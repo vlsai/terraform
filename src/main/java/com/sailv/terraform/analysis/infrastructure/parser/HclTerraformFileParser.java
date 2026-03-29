@@ -14,6 +14,15 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
+/**
+ * `.tf` 解析器。
+ *
+ * <p>当前实现是轻量解析器，只覆盖这次业务需要的 Terraform 结构，
+ * 目的是保证库能独立编译运行。
+ *
+ * <p>后续如果你要接入 `hcl2j`，建议保留这个类的返回结果和职责边界不变，
+ * 只替换内部的 HCL 解析细节。
+ */
 public class HclTerraformFileParser implements TerraformFileParser {
 
     @Override
@@ -38,6 +47,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
             if (entry.entryType() != EntryType.BLOCK) {
                 continue;
             }
+            // 这里只提取后续业务映射会用到的 block 类型，不构建完整 AST。
             switch (entry.name()) {
                 case "provider" -> {
                     if (!entry.labels().isEmpty()) {
@@ -85,6 +95,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
     }
 
     private void collectModuleReference(HclEntry moduleBlock, Path file, List<DiscoveredModuleReference> moduleReferences) {
+        // module block 中真正影响递归解析的字段只有 source。
         List<HclEntry> nestedEntries = new HclEntryParser(moduleBlock.body()).parseEntries();
         nestedEntries.stream()
             .filter(entry -> entry.entryType() == EntryType.ASSIGNMENT)
@@ -180,10 +191,12 @@ public class HclTerraformFileParser implements TerraformFileParser {
                 }
                 char current = current();
                 if (current == '{') {
+                    // block：resource "aws_instance" "web" { ... }
                     String body = readBalanced('{', '}');
                     return HclEntry.block(name, labels, body);
                 }
                 if (current == '=') {
+                    // assignment：source = "./modules/network"
                     index++;
                     skipWhitespaceAndComments();
                     ParsedValue value = parseValue();

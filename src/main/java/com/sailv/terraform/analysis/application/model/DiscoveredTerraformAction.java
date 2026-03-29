@@ -3,6 +3,13 @@ package com.sailv.terraform.analysis.application.model;
 import com.sailv.terraform.analysis.domain.model.TerraformActionKind;
 import java.util.Objects;
 
+/**
+ * 解析阶段发现的 Terraform 动作。
+ *
+ * <p>例如：
+ * {@code resource "aws_instance" "web" {}} 会被解析成 providerName=aws, actionName=aws_instance。
+ * 这里不直接包含 providerType / resourceType，因为这些值依赖预制表查询。
+ */
 public record DiscoveredTerraformAction(
     String providerName,
     String actionName,

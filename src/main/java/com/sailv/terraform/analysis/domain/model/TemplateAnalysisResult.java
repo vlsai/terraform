@@ -2,8 +2,14 @@ package com.sailv.terraform.analysis.domain.model;
 
 import java.util.List;
 
+/**
+ * 最终输出给上层系统的分析结果。
+ *
+ * <p>该对象已经是“便于落库 / 便于后续处理”的形态：
+ * providers、quotaResources、quotaChecks 都可以直接被应用层消费。
+ */
 public record TemplateAnalysisResult(
-    Long templateId,
+    String templateId,
     List<TemplateProvider> providers,
     List<TemplateQuotaResource> quotaResources,
     List<QuotaCheckRequest> quotaChecks,

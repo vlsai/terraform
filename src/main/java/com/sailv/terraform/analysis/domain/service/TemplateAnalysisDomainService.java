@@ -20,6 +20,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+/**
+ * 领域服务。
+ *
+ * <p>它负责把“Terraform 解析结果”翻译成“系统关心的业务结果”：
+ * 例如 providerType / resourceType / quotaType 的补全，都是在这里完成的。
+ */
 public class TemplateAnalysisDomainService {
 
     private final ProviderActionQueryPort providerActionQueryPort;
@@ -29,15 +35,18 @@ public class TemplateAnalysisDomainService {
     }
 
     public TemplateAnalysisResult analyze(
-        Long templateId,
+        String templateId,
         DiscoveredTemplateStructure discovered,
         Collection<QuotaCheckRule> quotaRules
     ) {
+        // 运行时传入的 quota 规则，先按 resourceType 建立索引，便于后续快速匹配。
         Map<String, QuotaCheckRule> quotaRuleIndex = QuotaCheckRule.indexByResourceType(quotaRules);
         List<AnalysisWarning> warnings = new ArrayList<>(discovered.warnings());
 
+        // 先用预制表补全每个 action 的 providerType / resourceType / quotaType。
         Map<ActionLookupKey, ProviderActionDefinition> definitions = loadDefinitions(discovered.actions(), warnings);
 
+        // provider 既可能来自显式 provider block，也可能只出现在 resource/data 前缀里。
         Set<String> usedProviders = new LinkedHashSet<>(discovered.providerBlockNames());
         discovered.actions().stream()
             .map(DiscoveredTerraformAction::providerName)
@@ -56,10 +65,12 @@ public class TemplateAnalysisDomainService {
                 .comparing(DiscoveredTerraformAction::providerName)
                 .thenComparing(DiscoveredTerraformAction::actionName))
             .forEach(action -> {
+                // 查不到预制表映射时，只记 warning，不中断整个模板分析流程。
                 ProviderActionDefinition definition = definitions.get(new ActionLookupKey(action.providerName(), action.actionName()));
                 if (definition == null || definition.resourceType() == null) {
                     return;
                 }
+                // 只有命中 quota 规则的 resourceType，才会产出配额相关结果。
                 QuotaCheckRule rule = quotaRuleIndex.get(definition.resourceType());
                 if (rule == null) {
                     return;
@@ -116,6 +127,7 @@ public class TemplateAnalysisDomainService {
                     definitions.put(key, definition.get());
                     return;
                 }
+                // 这里保留 warning，是为了让上层自行决定：是仅提示，还是阻断模板入库。
                 warnings.add(new AnalysisWarning(
                     "ACTION_MAPPING_NOT_FOUND",
                     "No provider action mapping found for provider=" + action.providerName() + ", action=" + action.actionName(),
@@ -126,6 +138,7 @@ public class TemplateAnalysisDomainService {
     }
 
     private String resolveProviderType(String providerName, Collection<ProviderActionDefinition> definitions) {
+        // providerType 完全依赖预制表，不从模板文本直接推断。
         return definitions.stream()
             .filter(definition -> providerName.equals(definition.providerName()))
             .map(ProviderActionDefinition::providerType)

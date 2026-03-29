@@ -16,6 +16,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * `.tf.json` 解析器。
+ *
+ * <p>当前实现使用库内轻量 JSON 解析器，避免引入外部 JSON 依赖。
+ * 如果内网项目已有统一 JSON 组件，也可以替换内部实现，只要输出保持一致即可。
+ */
 public class JsonTerraformFileParser implements TerraformFileParser {
 
     @Override
@@ -25,6 +31,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
 
     @Override
     public ParsedTerraformFile parse(Path file) throws IOException {
+        // 解析出的对象树只用于读取当前业务关心的 provider/resource/module 结构。
         Object rootValue = new JsonParser(Files.readString(file)).parse();
         Map<String, Object> root = asObject(rootValue);
 
@@ -132,6 +139,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
         }
 
         private Object parse() {
+            // 这里实现的是最小 JSON 解析器，只覆盖当前模板分析所需语法。
             skipWhitespace();
             Object value = parseValue();
             skipWhitespace();

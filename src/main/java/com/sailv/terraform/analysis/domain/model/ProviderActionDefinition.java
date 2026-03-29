@@ -2,6 +2,11 @@ package com.sailv.terraform.analysis.domain.model;
 
 import java.util.Objects;
 
+/**
+ * 预制表 {@code t_mp_provider_actions} 的领域映射。
+ *
+ * <p>迁移到内网项目时，需要由上层持久化层把数据库查询结果转成这个对象。
+ */
 public record ProviderActionDefinition(
     String providerName,
     String actionName,

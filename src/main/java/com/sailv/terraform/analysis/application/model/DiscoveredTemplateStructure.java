@@ -5,6 +5,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
+/**
+ * 应用层内部的中间结果。
+ *
+ * <p>它承接解析器产出的“发现结果”，再交给领域服务做 providerType / resourceType / quota 映射。
+ * 这样解析逻辑和业务映射逻辑就能解耦，后续迁移更容易替换其中一层。
+ */
 public record DiscoveredTemplateStructure(
     Set<String> providerBlockNames,
     Set<String> requiredProviderNames,

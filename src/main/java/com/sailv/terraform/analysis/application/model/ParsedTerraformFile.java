@@ -4,6 +4,12 @@ import com.sailv.terraform.analysis.domain.model.AnalysisWarning;
 import java.util.List;
 import java.util.Set;
 
+/**
+ * 单个 Terraform 文件的解析结果。
+ *
+ * <p>一个 module 目录下可能有多个 `.tf` / `.tf.json` 文件，
+ * 应用层会把这些单文件结果继续汇总。
+ */
 public record ParsedTerraformFile(
     Set<String> providerBlockNames,
     Set<String> requiredProviderNames,

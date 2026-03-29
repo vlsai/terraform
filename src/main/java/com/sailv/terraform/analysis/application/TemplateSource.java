@@ -8,6 +8,14 @@ import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Objects;
 
+/**
+ * 模板输入源抽象。
+ *
+ * <p>这个类把磁盘文件、上传字节流、输入流统一封装成同一种输入对象，
+ * 这样应用层只需要处理一种调用方式。
+ *
+ * <p>迁移到内网项目时通常不需要改这里，直接复用即可。
+ */
 public final class TemplateSource {
     private final String fileName;
     private final Path path;

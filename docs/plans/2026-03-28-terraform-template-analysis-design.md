@@ -93,6 +93,8 @@ TemplateAnalysisResult result = analyzeService.analyze(
 );
 ```
 
+`templateId` uses `String` so it can directly carry UUID values from the host system.
+
 The library supports:
 
 - path-backed sources for on-disk analysis

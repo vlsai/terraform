@@ -28,6 +28,20 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Stream;
 
+/**
+ * Terraform 模板分析入口。
+ *
+ * <p>职责划分：
+ * <ul>
+ *     <li>识别输入是 `.zip`、`.tf` 还是 `.tf.json`</li>
+ *     <li>如果是 zip，则安全解压到临时目录</li>
+ *     <li>递归扫描根模块和本地 module</li>
+ *     <li>把“解析结果”交给领域服务，生成最终可落库对象</li>
+ * </ul>
+ *
+ * <p>迁移到内网环境时，通常只需要替换 {@link ProviderActionQueryPort} 的实现，
+ * 让它对接你们现有的 DAO / Repository。
+ */
 public class TerraformTemplateAnalyzeService {
 
     private final List<TerraformFileParser> parsers;
@@ -52,8 +66,9 @@ public class TerraformTemplateAnalyzeService {
         this.domainService = domainService;
     }
 
-    public TemplateAnalysisResult analyze(Long templateId, TemplateSource source, Collection<QuotaCheckRule> quotaRules)
+    public TemplateAnalysisResult analyze(String templateId, TemplateSource source, Collection<QuotaCheckRule> quotaRules)
         throws IOException {
+        // 这里只接受当前需求中明确支持的三种 Terraform 输入。
         if (!source.isZip() && !source.isTerraformFile()) {
             throw new IllegalArgumentException("Unsupported template source: " + source.fileName());
         }
@@ -64,12 +79,15 @@ public class TerraformTemplateAnalyzeService {
             List<Path> moduleRoots;
 
             if (source.isZip()) {
+                // zip 包统一解压到临时目录，后续流程全部走基于 Path 的扫描逻辑。
                 tempWorkspace = Files.createTempDirectory("terraform-analysis-zip-");
                 Path extracted = zipExtractor.extract(source, tempWorkspace.resolve("unzipped"));
                 moduleRoots = determineStartingModuleDirs(extracted, bootstrapWarnings);
             } else if (source.isPathBacked()) {
+                // 已经在磁盘上的 `.tf` / `.tf.json` 文件，直接使用其父目录作为模块目录。
                 moduleRoots = List.of(source.path().toAbsolutePath().normalize().getParent());
             } else {
+                // 流式输入先物化到临时文件，否则 parser 无法统一按 Path 处理。
                 tempWorkspace = Files.createTempDirectory("terraform-analysis-file-");
                 Path materialized = tempWorkspace.resolve(source.fileName());
                 try (InputStream inputStream = source.openStream()) {
@@ -104,6 +122,7 @@ public class TerraformTemplateAnalyzeService {
         Set<Path> visited = new HashSet<>();
 
         while (!toVisit.isEmpty()) {
+            // 用队列遍历本地 module，避免重复解析已经访问过的目录。
             Path moduleDir = toVisit.removeFirst().toRealPath().normalize();
             if (!visited.add(moduleDir)) {
                 continue;
@@ -118,6 +137,7 @@ public class TerraformTemplateAnalyzeService {
                 continue;
             }
             for (Path terraformFile : terraformFiles) {
+                // parser 只负责“发现 provider/resource/module”，不负责数据库映射。
                 ParsedTerraformFile parsed = parserFor(terraformFile).parse(terraformFile);
                 builder.addProviders(parsed.providerBlockNames())
                     .addRequiredProviders(parsed.requiredProviderNames())
@@ -137,6 +157,7 @@ public class TerraformTemplateAnalyzeService {
     ) {
         for (DiscoveredModuleReference moduleReference : moduleReferences) {
             if (!isLocalModuleSource(moduleReference.rawSource())) {
+                // 远程 module 不在库内拉取，避免把网络和认证逻辑硬耦合到此库。
                 builder.addWarnings(List.of(new AnalysisWarning(
                     "REMOTE_MODULE_SKIPPED",
                     "Skipped remote module source " + moduleReference.rawSource(),
@@ -158,6 +179,7 @@ public class TerraformTemplateAnalyzeService {
     }
 
     private List<Path> determineStartingModuleDirs(Path extractedRoot, List<AnalysisWarning> warnings) throws IOException {
+        // 很多 zip 上传包会额外包一层目录，先做一次单层折叠，提升根模块识别率。
         Path collapsedRoot = collapseSingleNestedRoot(extractedRoot);
         if (hasDirectTerraformFiles(collapsedRoot)) {
             return List.of(collapsedRoot);
@@ -181,6 +203,7 @@ public class TerraformTemplateAnalyzeService {
         }
 
         if (!discoveredRoots.isEmpty()) {
+            // 根目录本身没有 Terraform 文件时，退化为扫描所有疑似模块目录。
             warnings.add(new AnalysisWarning(
                 "ROOT_MODULE_GUESSED",
                 "No Terraform files were found at archive root; falling back to discovered Terraform directories",
@@ -232,6 +255,7 @@ public class TerraformTemplateAnalyzeService {
     }
 
     private boolean isLocalModuleSource(String rawSource) {
+        // 仅把明显的本地路径当作递归解析目标；带协议或 git:: 的 source 统一视为远程。
         String normalized = rawSource.trim().replace('\\', '/');
         if (normalized.startsWith("./") || normalized.startsWith("../") || normalized.startsWith("/")) {
             return true;
