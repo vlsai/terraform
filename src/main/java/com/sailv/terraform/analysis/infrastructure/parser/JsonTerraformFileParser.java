@@ -1,28 +1,58 @@
 package com.sailv.terraform.analysis.infrastructure.parser;
 
-import com.sailv.terraform.analysis.application.model.DiscoveredModuleReference;
-import com.sailv.terraform.analysis.application.model.DiscoveredTerraformAction;
-import com.sailv.terraform.analysis.application.model.ParsedTerraformFile;
-import com.sailv.terraform.analysis.domain.model.AnalysisWarning;
-import com.sailv.terraform.analysis.domain.model.TerraformActionKind;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.json.JsonReadFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.sailv.terraform.analysis.domain.model.TerraformAction;
+
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Set;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * `.tf.json` 解析器。
  *
- * <p>当前实现使用库内轻量 JSON 解析器，避免引入外部 JSON 依赖。
- * 如果内网项目已有统一 JSON 组件，也可以替换内部实现，只要输出保持一致即可。
+ * <p>生产场景下的 Terraform JSON 往往来自不同工具链：
+ * 标准 Terraform 输出、平台导出的 JSON、带注释或尾逗号的 JSON 文件都会出现。
+ * 因此这里不再使用手写最小 JSON 解析器，而是直接基于 Jackson Tree Model 做容错解析。
+ *
+ * <p>当前只抽取当前业务真正关心的四类 Terraform 信息：
+ * <ul>
+ *     <li>provider block 名称</li>
+ *     <li>resource block 对应的 Terraform 类型</li>
+ *     <li>data block 对应的 Terraform 类型</li>
+ *     <li>module block 中的 source</li>
+ * </ul>
+ *
+ * <p>其余字段即使存在，也不会影响主流程；解析不到时仅记录日志并跳过，
+ * 尽量保证模板上传场景下“能解析多少就返回多少”。
  */
 public class JsonTerraformFileParser implements TerraformFileParser {
+
+    private static final Logger LOGGER = Logger.getLogger(JsonTerraformFileParser.class.getName());
+
+    /**
+     * 允许少量现实场景中的“非严格 JSON”写法，减少因为工具链差异导致的误失败。
+     */
+    private static final ObjectMapper OBJECT_MAPPER = JsonMapper.builder()
+        .enable(JsonReadFeature.ALLOW_JAVA_COMMENTS)
+        .enable(JsonReadFeature.ALLOW_YAML_COMMENTS)
+        .enable(JsonReadFeature.ALLOW_SINGLE_QUOTES)
+        .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
+        .build();
 
     @Override
     public boolean supports(Path file) {
@@ -30,273 +60,345 @@ public class JsonTerraformFileParser implements TerraformFileParser {
     }
 
     @Override
-    public ParsedTerraformFile parse(Path file) throws IOException {
-        // 解析出的对象树只用于读取当前业务关心的 provider/resource/module 结构。
-        Object rootValue = new JsonParser(Files.readString(file)).parse();
-        Map<String, Object> root = asObject(rootValue);
+    public ParseResult parse(Path file) throws IOException {
+        JsonNode root = readRoot(file);
+        if (root == null || root.isMissingNode() || root.isNull()) {
+            return emptyResult();
+        }
+        if (!root.isObject()) {
+            LOGGER.warning(() -> "[INVALID_TERRAFORM_JSON] Terraform JSON root must be an object: " + file);
+            return emptyResult();
+        }
 
+        // 使用 LinkedHashSet / LinkedHashMap 的原因与 HCL 解析器一致：
+        // 1. 去重
+        // 2. 保持输入出现顺序，方便 debug
+        // 3. 让调试打印和测试结果更稳定
         Set<String> providerBlockNames = new LinkedHashSet<>();
-        Set<String> requiredProviderNames = new LinkedHashSet<>();
-        Set<DiscoveredTerraformAction> actions = new LinkedHashSet<>();
-        List<DiscoveredModuleReference> moduleReferences = new ArrayList<>();
-        List<AnalysisWarning> warnings = new ArrayList<>();
+        List<TerraformAction> actions = new ArrayList<>();
+        List<ModuleReference> moduleReferences = new ArrayList<>();
+        Map<String, Integer> localValues = new LinkedHashMap<>();
 
-        collectRequiredProviders(value(root, "terraform"), requiredProviderNames);
-        collectProviderBlocks(value(root, "provider"), providerBlockNames);
-        collectActions(value(root, "resource"), TerraformActionKind.RESOURCE, file, actions);
-        collectActions(value(root, "data"), TerraformActionKind.DATA_SOURCE, file, actions);
-        collectModules(file, value(root, "module"), moduleReferences);
+        collectProviderBlocks(file, root.path("provider"), providerBlockNames);
+        collectLocals(file, root.path("locals"), localValues);
+        collectActions(root.path("resource"), TerraformAction.Kind.RESOURCE, file, localValues, actions);
+        collectActions(root.path("data"), TerraformAction.Kind.DATA_SOURCE, file, localValues, actions);
+        collectModules(file, root.path("module"), moduleReferences);
 
-        if (providerBlockNames.isEmpty() && requiredProviderNames.isEmpty() && actions.isEmpty()) {
-            warnings.add(new AnalysisWarning(
-                "EMPTY_TERRAFORM_JSON",
-                "Terraform JSON file did not contain provider, resource, data, or module blocks",
-                file.toString()
+        if (providerBlockNames.isEmpty() && actions.isEmpty() && moduleReferences.isEmpty()) {
+            LOGGER.info(() -> "[EMPTY_TERRAFORM_JSON] Terraform JSON file did not contain provider, resource, data, or module blocks: "
+                + file);
+        }
+
+        return new ParseResult(providerBlockNames, actions, moduleReferences);
+    }
+
+    private JsonNode readRoot(Path file) throws IOException {
+        try (InputStream inputStream = Files.newInputStream(file)) {
+            return OBJECT_MAPPER.readTree(inputStream);
+        } catch (JsonProcessingException exception) {
+            LOGGER.log(Level.WARNING, "[INVALID_TERRAFORM_JSON] Failed to parse Terraform JSON file " + file, exception);
+            return null;
+        }
+    }
+
+    private ParseResult emptyResult() {
+        return new ParseResult(Set.of(), List.of(), List.of());
+    }
+
+    /**
+     * Terraform JSON 中 provider 段的标准形态是：
+     * {"provider":{"huaweicloud":{...},"aws":[{...}]}}
+     *
+     * <p>因此这里支持 object / array 两种容器，字段名本身就是 providerName。
+     */
+    private void collectProviderBlocks(Path file, JsonNode providerNode, Set<String> providerBlockNames) {
+        if (isEmpty(providerNode)) {
+            return;
+        }
+        if (providerNode.isArray()) {
+            for (JsonNode item : providerNode) {
+                collectProviderBlocks(file, item, providerBlockNames);
+            }
+            return;
+        }
+        if (!providerNode.isObject()) {
+            logUnexpectedShape("provider", file, providerNode);
+            return;
+        }
+        providerNode.fieldNames().forEachRemaining(providerName -> addNonBlank(providerBlockNames, providerName));
+    }
+
+    private void collectLocals(Path file, JsonNode localsNode, Map<String, Integer> localValues) {
+        if (isEmpty(localsNode)) {
+            return;
+        }
+        if (localsNode.isArray()) {
+            for (JsonNode item : localsNode) {
+                collectLocals(file, item, localValues);
+            }
+            return;
+        }
+        if (!localsNode.isObject()) {
+            logUnexpectedShape("locals", file, localsNode);
+            return;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = localsNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            // 这里只接收可以稳定落成整数的 locals，
+            // 用来支持 count = local.xxx。
+            Integer value = asInteger(entry.getValue());
+            if (value != null) {
+                localValues.put(entry.getKey(), value);
+            }
+        }
+    }
+
+    /**
+     * Terraform JSON 的 resource / data 段第一层字段名就是 Terraform 类型，
+     * 例如：
+     * {"resource":{"huaweicloud_compute_instance":{"web":{...}}}}
+     *
+     * <p>这里会继续深入一层资源实例名，例如 web/db，并尝试提取 count。
+     */
+    private void collectActions(
+        JsonNode sectionNode,
+        TerraformAction.Kind kind,
+        Path file,
+        Map<String, Integer> localValues,
+        List<TerraformAction> actions
+    ) {
+        if (isEmpty(sectionNode)) {
+            return;
+        }
+        if (sectionNode.isArray()) {
+            for (JsonNode item : sectionNode) {
+                collectActions(item, kind, file, localValues, actions);
+            }
+            return;
+        }
+        if (!sectionNode.isObject()) {
+            logUnexpectedShape(kind == TerraformAction.Kind.RESOURCE ? "resource" : "data", file, sectionNode);
+            return;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = sectionNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            // 第一层 key 就是要入库到 t_mp_template_providers.provider_name 的 Terraform 类型，
+            // 例如 huaweicloud_compute_instance、huaweicloud_cce_node。
+            addActionInstances(file, kind, entry.getKey(), entry.getValue(), localValues, actions);
+        }
+    }
+
+    /**
+     * module 段中的 source 可能直接位于对象中，也可能被表示成数组中的多个块。
+     * 这里递归抽取所有本地或远程 source，是否继续递归 module 目录由 service 决定。
+     */
+    private void collectModules(Path file, JsonNode moduleNode, List<ModuleReference> moduleReferences) {
+        if (isEmpty(moduleNode)) {
+            return;
+        }
+        if (moduleNode.isArray()) {
+            for (JsonNode item : moduleNode) {
+                collectModules(file, item, moduleReferences);
+            }
+            return;
+        }
+        if (!moduleNode.isObject()) {
+            logUnexpectedShape("module", file, moduleNode);
+            return;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = moduleNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            extractModuleSource(file, entry.getValue(), moduleReferences);
+        }
+    }
+
+    private void extractModuleSource(Path file, JsonNode moduleConfig, List<ModuleReference> moduleReferences) {
+        if (isEmpty(moduleConfig)) {
+            return;
+        }
+        if (moduleConfig.isArray()) {
+            for (JsonNode item : moduleConfig) {
+                extractModuleSource(file, item, moduleReferences);
+            }
+            return;
+        }
+        if (!moduleConfig.isObject()) {
+            logUnexpectedShape("module.source", file, moduleConfig);
+            return;
+        }
+
+        JsonNode sourceNode = moduleConfig.path("source");
+        if (sourceNode.isTextual()) {
+            String source = sourceNode.asText().trim();
+            if (!source.isEmpty()) {
+                moduleReferences.add(new ModuleReference(source));
+            }
+        }
+    }
+
+    private void addActionInstances(
+        Path file,
+        TerraformAction.Kind kind,
+        String rawActionName,
+        JsonNode actionNode,
+        Map<String, Integer> localValues,
+        List<TerraformAction> actions
+    ) {
+        String terraformType = normalize(rawActionName);
+        if (terraformType == null) {
+            return;
+        }
+
+        if (isEmpty(actionNode)) {
+            // 尽量保留最小动作信息，避免因为结构不完整导致整块丢失。
+            actions.add(new TerraformAction(terraformType, terraformType, terraformType, kind, 1));
+            return;
+        }
+        if (actionNode.isArray()) {
+            for (JsonNode item : actionNode) {
+                addActionInstances(file, kind, terraformType, item, localValues, actions);
+            }
+            return;
+        }
+        if (!actionNode.isObject()) {
+            actions.add(new TerraformAction(terraformType, terraformType, terraformType, kind, 1));
+            return;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> instances = actionNode.fields();
+        boolean foundInstance = false;
+        while (instances.hasNext()) {
+            Map.Entry<String, JsonNode> instance = instances.next();
+            foundInstance = true;
+            // 只有 resource 参与配额数量统计。
+            int requestedAmount = kind == TerraformAction.Kind.RESOURCE
+                ? resolveRequestedAmount(file, instance.getValue(), localValues)
+                : 1;
+            if (requestedAmount <= 0) {
+                // count <= 0 代表不会真正创建资源，不进入入库结果。
+                continue;
+            }
+            actions.add(new TerraformAction(
+                terraformType,
+                terraformType,
+                normalize(instance.getKey()),
+                kind,
+                requestedAmount
             ));
         }
 
-        return new ParsedTerraformFile(providerBlockNames, requiredProviderNames, actions, moduleReferences, warnings);
-    }
-
-    private void collectRequiredProviders(Object terraformNode, Set<String> requiredProviderNames) {
-        if (terraformNode instanceof List<?> terraformNodes) {
-            terraformNodes.forEach(node -> collectRequiredProviders(node, requiredProviderNames));
-            return;
+        if (!foundInstance) {
+            actions.add(new TerraformAction(terraformType, terraformType, terraformType, kind, 1));
         }
-        Map<String, Object> terraform = asObject(terraformNode);
-        Map<String, Object> requiredProviders = asObject(value(terraform, "required_providers"));
-        requiredProviderNames.addAll(requiredProviders.keySet());
     }
 
-    private void collectProviderBlocks(Object providerNode, Set<String> providerBlockNames) {
-        providerBlockNames.addAll(asObject(providerNode).keySet());
-    }
+    private int resolveRequestedAmount(Path file, JsonNode instanceNode, Map<String, Integer> localValues) {
+        if (instanceNode == null || !instanceNode.isObject()) {
+            return 1;
+        }
+        JsonNode countNode = instanceNode.path("count");
+        if (isEmpty(countNode)) {
+            return 1;
+        }
 
-    private void collectActions(
-        Object sectionNode,
-        TerraformActionKind kind,
-        Path file,
-        Set<DiscoveredTerraformAction> actions
-    ) {
-        for (String actionName : asObject(sectionNode).keySet()) {
-            String providerName = providerNameFromAction(actionName);
-            if (providerName != null) {
-                actions.add(new DiscoveredTerraformAction(providerName, actionName, kind, file.toString()));
+        Integer literalCount = asInteger(countNode);
+        if (literalCount != null) {
+            return Math.max(literalCount, 0);
+        }
+
+        // 这里只支持两种业务明确要求的写法：
+        // 1. count = 2
+        // 2. count = local.xxx / ${local.xxx}
+        //
+        // 其余表达式不尝试求值，以免在生产环境引入半吊子的 Terraform 解释器。
+        String expression = normalizeExpression(countNode.asText(null));
+        if (expression == null) {
+            return 1;
+        }
+        if (expression.startsWith("local.")) {
+            Integer resolved = localValues.get(expression.substring("local.".length()));
+            if (resolved != null) {
+                return Math.max(resolved, 0);
             }
+            LOGGER.warning(() -> "[LOCAL_COUNT_NOT_FOUND] Could not resolve local count expression "
+                + expression + ": " + file);
+            return 1;
+        }
+
+        LOGGER.info(() -> "[UNSUPPORTED_COUNT_EXPRESSION] Unsupported Terraform JSON count expression "
+            + expression + ": " + file);
+        return 1;
+    }
+
+    private void addNonBlank(Set<String> target, String rawValue) {
+        String normalized = normalize(rawValue);
+        if (normalized != null) {
+            target.add(normalized);
         }
     }
 
-    private void collectModules(Path file, Object moduleNode, List<DiscoveredModuleReference> moduleReferences) {
-        for (Object moduleConfig : asObject(moduleNode).values()) {
-            extractModuleSource(file, moduleConfig, moduleReferences);
-        }
-    }
-
-    private void extractModuleSource(Path file, Object moduleConfig, List<DiscoveredModuleReference> moduleReferences) {
-        if (moduleConfig instanceof List<?> modules) {
-            modules.forEach(node -> extractModuleSource(file, node, moduleReferences));
-            return;
-        }
-        String source = asString(value(asObject(moduleConfig), "source"));
-        if (source != null && !source.isBlank()) {
-            moduleReferences.add(new DiscoveredModuleReference(source, file.toString()));
-        }
-    }
-
-    private String providerNameFromAction(String actionName) {
-        if (actionName == null || actionName.isBlank()) {
+    private String normalize(String value) {
+        if (value == null) {
             return null;
         }
-        int separator = actionName.indexOf('_');
-        if (separator <= 0) {
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private Integer asInteger(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
             return null;
         }
-        return actionName.substring(0, separator);
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> asObject(Object value) {
-        if (value instanceof Map<?, ?> map) {
-            return (Map<String, Object>) map;
+        if (node.isIntegralNumber()) {
+            return node.asInt();
         }
-        return Map.of();
-    }
-
-    private Object value(Map<String, Object> map, String key) {
-        return map.get(key);
-    }
-
-    private String asString(Object value) {
-        return value instanceof String string ? string : null;
-    }
-
-    private static final class JsonParser {
-        private final String text;
-        private int index;
-
-        private JsonParser(String text) {
-            this.text = text;
+        if (node.isFloatingPointNumber()) {
+            double value = node.asDouble();
+            if (Math.floor(value) == value) {
+                return (int) value;
+            }
+            return null;
         }
-
-        private Object parse() {
-            // 这里实现的是最小 JSON 解析器，只覆盖当前模板分析所需语法。
-            skipWhitespace();
-            Object value = parseValue();
-            skipWhitespace();
-            return value;
-        }
-
-        private Object parseValue() {
-            skipWhitespace();
-            if (isEnd()) {
+        if (node.isTextual()) {
+            String normalized = normalizeExpression(node.asText());
+            if (normalized == null) {
                 return null;
             }
-            return switch (current()) {
-                case '{' -> parseObject();
-                case '[' -> parseArray();
-                case '"' -> parseString();
-                case 't' -> parseLiteral("true", Boolean.TRUE);
-                case 'f' -> parseLiteral("false", Boolean.FALSE);
-                case 'n' -> parseLiteral("null", null);
-                default -> parseNumber();
-            };
-        }
-
-        private Map<String, Object> parseObject() {
-            expect('{');
-            Map<String, Object> values = new LinkedHashMap<>();
-            skipWhitespace();
-            if (peek('}')) {
-                index++;
-                return values;
-            }
-            while (!isEnd()) {
-                String key = parseString();
-                skipWhitespace();
-                expect(':');
-                Object value = parseValue();
-                values.put(key, value);
-                skipWhitespace();
-                if (peek('}')) {
-                    index++;
-                    return values;
+            if (normalized.chars().allMatch(character -> Character.isDigit(character) || character == '-')) {
+                try {
+                    return Integer.parseInt(normalized);
+                } catch (NumberFormatException ignored) {
+                    return null;
                 }
-                expect(',');
-            }
-            return values;
-        }
-
-        private List<Object> parseArray() {
-            expect('[');
-            List<Object> values = new ArrayList<>();
-            skipWhitespace();
-            if (peek(']')) {
-                index++;
-                return values;
-            }
-            while (!isEnd()) {
-                values.add(parseValue());
-                skipWhitespace();
-                if (peek(']')) {
-                    index++;
-                    return values;
-                }
-                expect(',');
-            }
-            return values;
-        }
-
-        private Object parseLiteral(String literal, Object value) {
-            if (!text.startsWith(literal, index)) {
-                throw new IllegalArgumentException("Invalid JSON literal near index " + index);
-            }
-            index += literal.length();
-            return value;
-        }
-
-        private Number parseNumber() {
-            int start = index;
-            while (!isEnd()) {
-                char current = current();
-                if (!(Character.isDigit(current) || current == '-' || current == '+' || current == '.'
-                    || current == 'e' || current == 'E')) {
-                    break;
-                }
-                index++;
-            }
-            String raw = text.substring(start, index);
-            if (raw.contains(".") || raw.contains("e") || raw.contains("E")) {
-                return Double.parseDouble(raw);
-            }
-            return Long.parseLong(raw);
-        }
-
-        private String parseString() {
-            expect('"');
-            StringBuilder builder = new StringBuilder();
-            while (!isEnd()) {
-                char current = current();
-                if (current == '\\') {
-                    index++;
-                    if (isEnd()) {
-                        break;
-                    }
-                    builder.append(readEscape());
-                    continue;
-                }
-                if (current == '"') {
-                    index++;
-                    return builder.toString();
-                }
-                builder.append(current);
-                index++;
-            }
-            throw new IllegalArgumentException("Unterminated JSON string");
-        }
-
-        private char readEscape() {
-            char escaped = current();
-            index++;
-            return switch (escaped) {
-                case '"', '\\', '/' -> escaped;
-                case 'b' -> '\b';
-                case 'f' -> '\f';
-                case 'n' -> '\n';
-                case 'r' -> '\r';
-                case 't' -> '\t';
-                case 'u' -> {
-                    String unicode = text.substring(index, index + 4);
-                    index += 4;
-                    yield (char) Integer.parseInt(unicode, 16);
-                }
-                default -> escaped;
-            };
-        }
-
-        private void skipWhitespace() {
-            while (!isEnd() && Character.isWhitespace(current())) {
-                index++;
             }
         }
+        return null;
+    }
 
-        private void expect(char expected) {
-            skipWhitespace();
-            if (isEnd() || current() != expected) {
-                throw new IllegalArgumentException("Expected '" + expected + "' near index " + index);
-            }
-            index++;
+    private String normalizeExpression(String expression) {
+        String normalized = normalize(expression);
+        if (normalized == null) {
+            return null;
         }
+        if (normalized.startsWith("${") && normalized.endsWith("}")) {
+            normalized = normalize(normalized.substring(2, normalized.length() - 1));
+        }
+        return normalized;
+    }
 
-        private boolean peek(char expected) {
-            return !isEnd() && current() == expected;
-        }
+    private boolean isEmpty(JsonNode node) {
+        return node == null || node.isMissingNode() || node.isNull();
+    }
 
-        private char current() {
-            return text.charAt(index);
-        }
-
-        private boolean isEnd() {
-            return index >= text.length();
-        }
+    private void logUnexpectedShape(String sectionName, Path file, JsonNode node) {
+        LOGGER.warning(() -> "[UNEXPECTED_TERRAFORM_JSON_SECTION] Unexpected JSON node for " + sectionName
+            + " in " + file + ", nodeType=" + node.getNodeType());
     }
 }

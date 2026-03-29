@@ -1,24 +1,22 @@
-package com.sailv.terraform.analysis.application;
+package com.sailv.terraform.analysis.service.impl;
 
-import com.sailv.terraform.analysis.application.model.DiscoveredModuleReference;
-import com.sailv.terraform.analysis.application.model.DiscoveredTemplateStructure;
-import com.sailv.terraform.analysis.application.model.ParsedTerraformFile;
-import com.sailv.terraform.analysis.domain.model.AnalysisWarning;
+import com.sailv.terraform.analysis.application.TemplateSource;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
-import com.sailv.terraform.analysis.domain.port.ProviderActionQueryPort;
-import com.sailv.terraform.analysis.domain.service.TemplateAnalysisDomainService;
+import com.sailv.terraform.analysis.domain.model.TerraformTemplateDomain;
+import com.sailv.terraform.analysis.gateway.TemplateAnalysisGateway;
 import com.sailv.terraform.analysis.infrastructure.archive.ZipExtractor;
 import com.sailv.terraform.analysis.infrastructure.parser.HclTerraformFileParser;
 import com.sailv.terraform.analysis.infrastructure.parser.JsonTerraformFileParser;
 import com.sailv.terraform.analysis.infrastructure.parser.TerraformFileParser;
+import com.sailv.terraform.analysis.service.TerraformAnalysisService;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Deque;
@@ -26,68 +24,58 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 /**
- * Terraform 模板分析入口。
+ * Service 实现。
  *
- * <p>职责划分：
- * <ul>
- *     <li>识别输入是 `.zip`、`.tf` 还是 `.tf.json`</li>
- *     <li>如果是 zip，则安全解压到临时目录</li>
- *     <li>递归扫描根模块和本地 module</li>
- *     <li>把“解析结果”交给领域服务，生成最终可落库对象</li>
- * </ul>
- *
- * <p>迁移到内网环境时，通常只需要替换 {@link ProviderActionQueryPort} 的实现，
- * 让它对接你们现有的 DAO / Repository。
+ * <p>这里处理的是文件、压缩包、目录遍历、parser 选择等编排逻辑；
+ * 领域映射则交给 {@link TerraformTemplateDomain} 自身完成。
  */
-public class TerraformTemplateAnalyzeService {
+public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
+
+    private static final Logger LOGGER = Logger.getLogger(TerraformAnalysisServiceImpl.class.getName());
 
     private final List<TerraformFileParser> parsers;
     private final ZipExtractor zipExtractor;
-    private final TemplateAnalysisDomainService domainService;
+    private final TemplateAnalysisGateway templateAnalysisGateway;
 
-    public TerraformTemplateAnalyzeService(ProviderActionQueryPort providerActionQueryPort) {
+    public TerraformAnalysisServiceImpl(TemplateAnalysisGateway templateAnalysisGateway) {
         this(
             List.of(new JsonTerraformFileParser(), new HclTerraformFileParser()),
             new ZipExtractor(),
-            new TemplateAnalysisDomainService(providerActionQueryPort)
+            templateAnalysisGateway
         );
     }
 
-    public TerraformTemplateAnalyzeService(
+    public TerraformAnalysisServiceImpl(
         List<TerraformFileParser> parsers,
         ZipExtractor zipExtractor,
-        TemplateAnalysisDomainService domainService
+        TemplateAnalysisGateway templateAnalysisGateway
     ) {
         this.parsers = List.copyOf(parsers);
         this.zipExtractor = zipExtractor;
-        this.domainService = domainService;
+        this.templateAnalysisGateway = templateAnalysisGateway;
     }
 
+    @Override
     public TemplateAnalysisResult analyze(String templateId, TemplateSource source, Collection<QuotaCheckRule> quotaRules)
         throws IOException {
-        // 这里只接受当前需求中明确支持的三种 Terraform 输入。
         if (!source.isZip() && !source.isTerraformFile()) {
             throw new IllegalArgumentException("Unsupported template source: " + source.fileName());
         }
-
         Path tempWorkspace = null;
         try {
-            List<AnalysisWarning> bootstrapWarnings = new ArrayList<>();
             List<Path> moduleRoots;
 
             if (source.isZip()) {
-                // zip 包统一解压到临时目录，后续流程全部走基于 Path 的扫描逻辑。
                 tempWorkspace = Files.createTempDirectory("terraform-analysis-zip-");
                 Path extracted = zipExtractor.extract(source, tempWorkspace.resolve("unzipped"));
-                moduleRoots = determineStartingModuleDirs(extracted, bootstrapWarnings);
+                moduleRoots = determineStartingModuleDirs(extracted);
             } else if (source.isPathBacked()) {
-                // 已经在磁盘上的 `.tf` / `.tf.json` 文件，直接使用其父目录作为模块目录。
                 moduleRoots = List.of(source.path().toAbsolutePath().normalize().getParent());
             } else {
-                // 流式输入先物化到临时文件，否则 parser 无法统一按 Path 处理。
                 tempWorkspace = Files.createTempDirectory("terraform-analysis-file-");
                 Path materialized = tempWorkspace.resolve(source.fileName());
                 try (InputStream inputStream = source.openStream()) {
@@ -96,8 +84,12 @@ public class TerraformTemplateAnalyzeService {
                 moduleRoots = List.of(materialized.getParent());
             }
 
-            DiscoveredTemplateStructure discovered = discoverStructure(moduleRoots, bootstrapWarnings);
-            return domainService.analyze(templateId, discovered, quotaRules);
+            TerraformTemplateDomain templateDomain = discoverDomain(moduleRoots);
+            return templateDomain.analyze(
+                templateId,
+                quotaRules,
+                templateAnalysisGateway.findByProviderNameAndActionName(templateDomain.actions())
+            );
         } finally {
             if (tempWorkspace != null) {
                 deleteRecursively(tempWorkspace);
@@ -105,81 +97,68 @@ public class TerraformTemplateAnalyzeService {
         }
     }
 
-    private DiscoveredTemplateStructure discoverStructure(List<Path> moduleRoots, List<AnalysisWarning> bootstrapWarnings)
-        throws IOException {
-        DiscoveredTemplateStructure.Builder builder = DiscoveredTemplateStructure.builder().addWarnings(bootstrapWarnings);
+    @Override
+    public void save(TemplateAnalysisResult result) {
+        templateAnalysisGateway.save(result);
+    }
+
+    private TerraformTemplateDomain discoverDomain(List<Path> moduleRoots) throws IOException {
+        TerraformTemplateDomain templateDomain = new TerraformTemplateDomain();
 
         if (moduleRoots.isEmpty()) {
-            builder.addWarnings(List.of(new AnalysisWarning(
-                "NO_TERRAFORM_FILES",
-                "No Terraform files were found in the provided source",
-                ""
-            )));
-            return builder.build();
+            LOGGER.warning("[NO_TERRAFORM_FILES] No Terraform files were found in the provided source");
+            return templateDomain;
         }
 
         Deque<Path> toVisit = new ArrayDeque<>(moduleRoots);
         Set<Path> visited = new HashSet<>();
 
         while (!toVisit.isEmpty()) {
-            // 用队列遍历本地 module，避免重复解析已经访问过的目录。
             Path moduleDir = toVisit.removeFirst().toRealPath().normalize();
             if (!visited.add(moduleDir)) {
                 continue;
             }
+
             List<Path> terraformFiles = listDirectTerraformFiles(moduleDir);
             if (terraformFiles.isEmpty()) {
-                builder.addWarnings(List.of(new AnalysisWarning(
-                    "EMPTY_MODULE_DIRECTORY",
-                    "No Terraform files were found in module directory " + moduleDir,
-                    moduleDir.toString()
-                )));
+                LOGGER.info(() -> "[EMPTY_MODULE_DIRECTORY] No Terraform files were found in module directory "
+                    + moduleDir);
                 continue;
             }
+
             for (Path terraformFile : terraformFiles) {
-                // parser 只负责“发现 provider/resource/module”，不负责数据库映射。
-                ParsedTerraformFile parsed = parserFor(terraformFile).parse(terraformFile);
-                builder.addProviders(parsed.providerBlockNames())
-                    .addRequiredProviders(parsed.requiredProviderNames())
-                    .addActions(parsed.actions())
-                    .addWarnings(parsed.warnings());
-                enqueueLocalModules(moduleDir, parsed.moduleReferences(), builder, toVisit);
+                TerraformFileParser.ParseResult parseResult = parserFor(terraformFile).parse(terraformFile);
+                templateDomain.merge(parseResult);
+                enqueueLocalModules(moduleDir, parseResult.moduleReferences(), toVisit);
             }
         }
-        return builder.build();
+        return templateDomain;
     }
 
     private void enqueueLocalModules(
         Path currentModuleDir,
-        List<DiscoveredModuleReference> moduleReferences,
-        DiscoveredTemplateStructure.Builder builder,
+        List<TerraformFileParser.ModuleReference> moduleReferences,
         Deque<Path> toVisit
     ) {
-        for (DiscoveredModuleReference moduleReference : moduleReferences) {
+        for (TerraformFileParser.ModuleReference moduleReference : moduleReferences) {
             if (!isLocalModuleSource(moduleReference.rawSource())) {
-                // 远程 module 不在库内拉取，避免把网络和认证逻辑硬耦合到此库。
-                builder.addWarnings(List.of(new AnalysisWarning(
-                    "REMOTE_MODULE_SKIPPED",
-                    "Skipped remote module source " + moduleReference.rawSource(),
-                    moduleReference.sourceFile()
-                )));
+                LOGGER.info(() -> "[REMOTE_MODULE_SKIPPED] Skipped remote module source "
+                    + moduleReference.rawSource());
                 continue;
             }
+
             Path resolved = currentModuleDir.resolve(moduleReference.rawSource()).normalize();
             if (Files.exists(resolved) && Files.isDirectory(resolved)) {
                 toVisit.addLast(resolved);
                 continue;
             }
-            builder.addWarnings(List.of(new AnalysisWarning(
-                "MODULE_NOT_FOUND",
-                "Local module directory does not exist: " + moduleReference.rawSource(),
-                moduleReference.sourceFile()
-            )));
+
+            LOGGER.warning(() -> "[MODULE_NOT_FOUND] Local module directory does not exist: "
+                + moduleReference.rawSource());
         }
     }
 
-    private List<Path> determineStartingModuleDirs(Path extractedRoot, List<AnalysisWarning> warnings) throws IOException {
-        // 很多 zip 上传包会额外包一层目录，先做一次单层折叠，提升根模块识别率。
+    private List<Path> determineStartingModuleDirs(Path extractedRoot) throws IOException {
         Path collapsedRoot = collapseSingleNestedRoot(extractedRoot);
         if (hasDirectTerraformFiles(collapsedRoot)) {
             return List.of(collapsedRoot);
@@ -203,12 +182,8 @@ public class TerraformTemplateAnalyzeService {
         }
 
         if (!discoveredRoots.isEmpty()) {
-            // 根目录本身没有 Terraform 文件时，退化为扫描所有疑似模块目录。
-            warnings.add(new AnalysisWarning(
-                "ROOT_MODULE_GUESSED",
-                "No Terraform files were found at archive root; falling back to discovered Terraform directories",
-                collapsedRoot.toString()
-            ));
+            LOGGER.info(() -> "[ROOT_MODULE_GUESSED] No Terraform files were found at archive root; "
+                + "falling back to discovered Terraform directories under " + collapsedRoot);
         }
         return discoveredRoots;
     }
@@ -255,7 +230,6 @@ public class TerraformTemplateAnalyzeService {
     }
 
     private boolean isLocalModuleSource(String rawSource) {
-        // 仅把明显的本地路径当作递归解析目标；带协议或 git:: 的 source 统一视为远程。
         String normalized = rawSource.trim().replace('\\', '/');
         if (normalized.startsWith("./") || normalized.startsWith("../") || normalized.startsWith("/")) {
             return true;

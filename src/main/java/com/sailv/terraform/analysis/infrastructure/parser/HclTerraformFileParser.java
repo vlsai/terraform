@@ -1,29 +1,43 @@
 package com.sailv.terraform.analysis.infrastructure.parser;
 
-import com.sailv.terraform.analysis.application.model.DiscoveredModuleReference;
-import com.sailv.terraform.analysis.application.model.DiscoveredTerraformAction;
-import com.sailv.terraform.analysis.application.model.ParsedTerraformFile;
-import com.sailv.terraform.analysis.domain.model.AnalysisWarning;
-import com.sailv.terraform.analysis.domain.model.TerraformActionKind;
+import com.bertramlabs.plugins.hcl4j.HCLParser;
+import com.bertramlabs.plugins.hcl4j.HCLParserException;
+import com.sailv.terraform.analysis.domain.model.TerraformAction;
+
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.logging.Logger;
 
 /**
  * `.tf` 解析器。
  *
- * <p>当前实现是轻量解析器，只覆盖这次业务需要的 Terraform 结构，
- * 目的是保证库能独立编译运行。
+ * <p>按当前要求，`.tf` 文件不再使用任何自研解释逻辑，
+ * 只通过 `hcl4j` 读取 HCL 结构并提取业务需要的数据。
  *
- * <p>后续如果你要接入 `hcl2j`，建议保留这个类的返回结果和职责边界不变，
- * 只替换内部的 HCL 解析细节。
+ * <p>当前只关心四类信息：
+ * <ul>
+ *     <li>provider block 名称</li>
+ *     <li>resource / data 的 Terraform 类型与实例名</li>
+ *     <li>resource 对应的 count 数量</li>
+ *     <li>module source</li>
+ * </ul>
+ *
+ * <p>这里仍然保留 `locals` / `count` 的读取逻辑，但它们的数据来源完全是
+ * `hcl4j` 解析后的对象树，而不是手工扫描源码。
+ *
+ * <p>如果 `hcl4j` 无法解析某个 `.tf` 文件，当前实现会记录一条摘要日志并跳过该文件，
+ * 保证压缩包里其他可解析文件仍能继续参与分析。
  */
 public class HclTerraformFileParser implements TerraformFileParser {
+
+    private static final Logger LOGGER = Logger.getLogger(HclTerraformFileParser.class.getName());
 
     @Override
     public boolean supports(Path file) {
@@ -32,372 +46,226 @@ public class HclTerraformFileParser implements TerraformFileParser {
     }
 
     @Override
-    public ParsedTerraformFile parse(Path file) throws IOException {
-        String content = Files.readString(file);
-        HclEntryParser parser = new HclEntryParser(content);
-        List<HclEntry> entries = parser.parseEntries();
+    public ParseResult parse(Path file) throws IOException {
+        try {
+            return parseWithHcl4j(file);
+        } catch (HCLParserException | RuntimeException exception) {
+            LOGGER.warning(() -> "[HCL4J_PARSE_FAILED] Skip Terraform file because hcl4j could not parse it: "
+                + file + ", reason=" + rootMessage(exception));
+            return emptyResult();
+        }
+    }
 
+    private ParseResult parseWithHcl4j(Path file) throws HCLParserException, IOException {
+        Map<String, Object> root = asObject(new HCLParser().parse(file.toFile()));
+
+        // LinkedHash* 的目的不是功能必须，而是让调试顺序稳定：
+        // 去重的同时保留首次发现顺序，便于断点和日志排查。
         Set<String> providerBlockNames = new LinkedHashSet<>();
-        Set<String> requiredProviderNames = new LinkedHashSet<>();
-        Set<DiscoveredTerraformAction> actions = new LinkedHashSet<>();
-        List<DiscoveredModuleReference> moduleReferences = new ArrayList<>();
-        List<AnalysisWarning> warnings = new ArrayList<>();
+        List<TerraformAction> actions = new ArrayList<>();
+        List<ModuleReference> moduleReferences = new ArrayList<>();
+        Map<String, Integer> localValues = new LinkedHashMap<>();
 
-        for (HclEntry entry : entries) {
-            if (entry.entryType() != EntryType.BLOCK) {
+        collectProviderBlocks(value(root, "provider"), providerBlockNames);
+        collectLocals(value(root, "locals"), localValues);
+        collectActions(value(root, "resource"), TerraformAction.Kind.RESOURCE, file, localValues, actions);
+        collectActions(value(root, "data"), TerraformAction.Kind.DATA_SOURCE, file, localValues, actions);
+        collectModules(file, value(root, "module"), moduleReferences);
+
+        return new ParseResult(providerBlockNames, actions, moduleReferences);
+    }
+
+    private ParseResult emptyResult() {
+        return new ParseResult(Set.of(), List.of(), List.of());
+    }
+
+    private void collectProviderBlocks(Object providerNode, Set<String> providerBlockNames) {
+        providerBlockNames.addAll(asObject(providerNode).keySet());
+    }
+
+    private void collectLocals(Object localsNode, Map<String, Integer> localValues) {
+        if (localsNode instanceof List<?> localsList) {
+            localsList.forEach(item -> collectLocals(item, localValues));
+            return;
+        }
+
+        // 这里只提取后续 count = local.xxx 会用到的整数 locals。
+        // 非整数 locals、复杂表达式 locals 都不会参与数量计算。
+        for (Map.Entry<String, Object> entry : asObject(localsNode).entrySet()) {
+            Integer literal = asInteger(entry.getValue());
+            if (literal != null) {
+                localValues.put(entry.getKey(), literal);
+            }
+        }
+    }
+
+    private void collectActions(
+        Object sectionNode,
+        TerraformAction.Kind kind,
+        Path file,
+        Map<String, Integer> localValues,
+        List<TerraformAction> actions
+    ) {
+        for (Map.Entry<String, Object> actionEntry : asObject(sectionNode).entrySet()) {
+            String terraformType = normalize(actionEntry.getKey());
+            if (terraformType == null) {
+                LOGGER.warning(() -> "[PROVIDER_NAME_UNRESOLVED] Could not resolve provider name from action "
+                    + actionEntry.getKey() + ": " + file);
                 continue;
             }
-            // 这里只提取后续业务映射会用到的 block 类型，不构建完整 AST。
-            switch (entry.name()) {
-                case "provider" -> {
-                    if (!entry.labels().isEmpty()) {
-                        providerBlockNames.add(entry.labels().getFirst());
-                    }
-                }
-                case "resource" -> addAction(entry, TerraformActionKind.RESOURCE, file, actions, warnings);
-                case "data" -> addAction(entry, TerraformActionKind.DATA_SOURCE, file, actions, warnings);
-                case "module" -> collectModuleReference(entry, file, moduleReferences);
-                case "terraform" -> collectRequiredProviders(entry, requiredProviderNames);
-                default -> {
-                }
-            }
+            collectActionInstances(file, kind, terraformType, terraformType, actionEntry.getValue(), localValues, actions);
         }
-
-        return new ParsedTerraformFile(providerBlockNames, requiredProviderNames, actions, moduleReferences, warnings);
     }
 
-    private void addAction(
-        HclEntry entry,
-        TerraformActionKind kind,
+    private void collectActionInstances(
         Path file,
-        Set<DiscoveredTerraformAction> actions,
-        List<AnalysisWarning> warnings
+        TerraformAction.Kind kind,
+        String providerName,
+        String actionName,
+        Object actionNode,
+        Map<String, Integer> localValues,
+        List<TerraformAction> actions
     ) {
-        if (entry.labels().size() < 2) {
-            warnings.add(new AnalysisWarning(
-                "INVALID_ACTION_BLOCK",
-                "Expected two labels in " + entry.name() + " block",
-                file.toString()
-            ));
+        if (actionNode instanceof List<?> actionNodes) {
+            actionNodes.forEach(node -> collectActionInstances(file, kind, providerName, actionName, node, localValues, actions));
             return;
         }
-        String actionName = entry.labels().getFirst();
-        String providerName = providerNameFromAction(actionName);
-        if (providerName == null) {
-            warnings.add(new AnalysisWarning(
-                "PROVIDER_NAME_UNRESOLVED",
-                "Could not resolve provider name from action " + actionName,
-                file.toString()
-            ));
+
+        Map<String, Object> instances = asObject(actionNode);
+        if (instances.isEmpty()) {
+            actions.add(new TerraformAction(providerName, actionName, actionName, kind, 1));
             return;
         }
-        actions.add(new DiscoveredTerraformAction(providerName, actionName, kind, file.toString()));
+
+        for (Map.Entry<String, Object> instanceEntry : instances.entrySet()) {
+            int requestedAmount = kind == TerraformAction.Kind.RESOURCE
+                ? resolveRequestedAmount(file, instanceEntry.getValue(), localValues)
+                : 1;
+            if (requestedAmount <= 0) {
+                continue;
+            }
+            actions.add(new TerraformAction(
+                providerName,
+                actionName,
+                instanceEntry.getKey(),
+                kind,
+                requestedAmount
+            ));
+        }
     }
 
-    private void collectModuleReference(HclEntry moduleBlock, Path file, List<DiscoveredModuleReference> moduleReferences) {
-        // module block 中真正影响递归解析的字段只有 source。
-        List<HclEntry> nestedEntries = new HclEntryParser(moduleBlock.body()).parseEntries();
-        nestedEntries.stream()
-            .filter(entry -> entry.entryType() == EntryType.ASSIGNMENT)
-            .filter(entry -> "source".equals(entry.name()))
-            .map(HclEntry::stringValue)
-            .filter(value -> value != null && !value.isBlank())
-            .findFirst()
-            .ifPresent(source -> moduleReferences.add(new DiscoveredModuleReference(source, file.toString())));
+    private int resolveRequestedAmount(Path file, Object instanceConfig, Map<String, Integer> localValues) {
+        // 当前数量规则只支持：
+        // 1. count = 2
+        // 2. count = local.xxx
+        // 其余表达式按默认值 1 处理。
+        String expression = normalizeExpression(value(asObject(instanceConfig), "count"));
+        if (expression == null) {
+            return 1;
+        }
+        Integer literal = asInteger(expression);
+        if (literal != null) {
+            return Math.max(literal, 0);
+        }
+        if (expression.startsWith("local.")) {
+            Integer resolved = localValues.get(expression.substring("local.".length()));
+            if (resolved != null) {
+                return Math.max(resolved, 0);
+            }
+            LOGGER.warning(() -> "[LOCAL_COUNT_NOT_FOUND] Could not resolve local count expression "
+                + expression + ": " + file);
+            return 1;
+        }
+
+        LOGGER.info(() -> "[UNSUPPORTED_COUNT_EXPRESSION] Unsupported Terraform count expression "
+            + expression + ": " + file);
+        return 1;
     }
 
-    private void collectRequiredProviders(HclEntry terraformBlock, Set<String> requiredProviderNames) {
-        List<HclEntry> terraformEntries = new HclEntryParser(terraformBlock.body()).parseEntries();
-        terraformEntries.stream()
-            .filter(entry -> entry.entryType() == EntryType.BLOCK)
-            .filter(entry -> "required_providers".equals(entry.name()))
-            .forEach(requiredProvidersBlock -> {
-                List<HclEntry> providerEntries = new HclEntryParser(requiredProvidersBlock.body()).parseEntries();
-                providerEntries.stream()
-                    .filter(entry -> entry.entryType() == EntryType.ASSIGNMENT)
-                    .map(HclEntry::name)
-                    .forEach(requiredProviderNames::add);
-            });
+    private void collectModules(Path file, Object moduleNode, List<ModuleReference> moduleReferences) {
+        for (Object moduleConfig : asObject(moduleNode).values()) {
+            extractModuleSource(file, moduleConfig, moduleReferences);
+        }
     }
 
-    private String providerNameFromAction(String actionName) {
-        if (actionName == null || actionName.isBlank()) {
+    private void extractModuleSource(Path file, Object moduleConfig, List<ModuleReference> moduleReferences) {
+        if (moduleConfig instanceof List<?> modules) {
+            modules.forEach(node -> extractModuleSource(file, node, moduleReferences));
+            return;
+        }
+        String source = asString(value(asObject(moduleConfig), "source"));
+        if (source != null && !source.isBlank()) {
+            moduleReferences.add(new ModuleReference(source));
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> asObject(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            return (Map<String, Object>) map;
+        }
+        return Map.of();
+    }
+
+    private Object value(Map<String, Object> map, String key) {
+        return map.get(key);
+    }
+
+    private String asString(Object value) {
+        return value instanceof String string ? string : null;
+    }
+
+    private String normalize(String value) {
+        if (value == null) {
             return null;
         }
-        int separator = actionName.indexOf('_');
-        if (separator <= 0) {
-            return null;
-        }
-        return actionName.substring(0, separator);
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private enum EntryType {
-        BLOCK,
-        ASSIGNMENT
-    }
-
-    private record HclEntry(
-        EntryType entryType,
-        String name,
-        List<String> labels,
-        String body,
-        String stringValue
-    ) {
-        static HclEntry block(String name, List<String> labels, String body) {
-            return new HclEntry(EntryType.BLOCK, name, List.copyOf(labels), body, null);
+    private Integer asInteger(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
         }
-
-        static HclEntry assignment(String name, String stringValue) {
-            return new HclEntry(EntryType.ASSIGNMENT, name, List.of(), null, stringValue);
-        }
-    }
-
-    private static final class HclEntryParser {
-        private final String text;
-        private int index;
-
-        private HclEntryParser(String text) {
-            this.text = text;
-        }
-
-        private List<HclEntry> parseEntries() {
-            List<HclEntry> entries = new ArrayList<>();
-            while (true) {
-                skipWhitespaceAndComments();
-                if (isEnd()) {
-                    return entries;
-                }
-                HclEntry entry = parseEntry();
-                if (entry != null) {
-                    entries.add(entry);
-                    continue;
-                }
-                index++;
-            }
-        }
-
-        private HclEntry parseEntry() {
-            String name = parseIdentifier();
-            if (name == null) {
+        if (value instanceof String string) {
+            String normalized = normalizeExpression(string);
+            if (normalized == null || normalized.isEmpty()) {
                 return null;
             }
-
-            skipWhitespaceAndComments();
-            List<String> labels = new ArrayList<>();
-            while (!isEnd()) {
-                skipWhitespaceAndComments();
-                if (isEnd()) {
-                    return null;
-                }
-                char current = current();
-                if (current == '{') {
-                    // block：resource "aws_instance" "web" { ... }
-                    String body = readBalanced('{', '}');
-                    return HclEntry.block(name, labels, body);
-                }
-                if (current == '=') {
-                    // assignment：source = "./modules/network"
-                    index++;
-                    skipWhitespaceAndComments();
-                    ParsedValue value = parseValue();
-                    return HclEntry.assignment(name, value.stringValue());
-                }
-                String label = parseLabel();
-                if (label != null) {
-                    labels.add(label);
-                    continue;
-                }
+            if (!normalized.chars().allMatch(character -> Character.isDigit(character) || character == '-')) {
                 return null;
+            }
+            try {
+                return Integer.parseInt(normalized);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private String normalizeExpression(Object value) {
+        if (!(value instanceof String string)) {
+            if (value instanceof Number number) {
+                return String.valueOf(number.intValue());
             }
             return null;
         }
-
-        private ParsedValue parseValue() {
-            if (isEnd()) {
-                return new ParsedValue(null);
-            }
-            char current = current();
-            if (current == '"') {
-                return new ParsedValue(parseString());
-            }
-            if (current == '{') {
-                readBalanced('{', '}');
-                return new ParsedValue(null);
-            }
-            if (current == '[') {
-                readBalanced('[', ']');
-                return new ParsedValue(null);
-            }
-            int start = index;
-            while (!isEnd()) {
-                char valueChar = current();
-                if (valueChar == '\n' || valueChar == '\r') {
-                    break;
-                }
-                if (valueChar == '#' || startsWith("//") || startsWith("/*")) {
-                    break;
-                }
-                index++;
-            }
-            String raw = text.substring(start, index).trim();
-            return new ParsedValue(raw.isEmpty() ? null : raw);
+        String normalized = string.trim();
+        if (normalized.isEmpty()) {
+            return null;
         }
-
-        private String parseLabel() {
-            if (isEnd()) {
-                return null;
-            }
-            if (current() == '"') {
-                return parseString();
-            }
-            return parseIdentifier();
+        if (normalized.startsWith("${") && normalized.endsWith("}")) {
+            normalized = normalized.substring(2, normalized.length() - 1).trim();
         }
-
-        private String parseIdentifier() {
-            if (isEnd() || !isIdentifierStart(current())) {
-                return null;
-            }
-            int start = index;
-            index++;
-            while (!isEnd() && isIdentifierPart(current())) {
-                index++;
-            }
-            return text.substring(start, index);
-        }
-
-        private String parseString() {
-            if (current() != '"') {
-                return null;
-            }
-            index++;
-            StringBuilder value = new StringBuilder();
-            while (!isEnd()) {
-                char current = current();
-                if (current == '\\') {
-                    if (index + 1 < text.length()) {
-                        value.append(text.charAt(index + 1));
-                        index += 2;
-                        continue;
-                    }
-                    index++;
-                    continue;
-                }
-                if (current == '"') {
-                    index++;
-                    return value.toString();
-                }
-                value.append(current);
-                index++;
-            }
-            return value.toString();
-        }
-
-        private String readBalanced(char open, char close) {
-            if (current() != open) {
-                return "";
-            }
-            int start = index + 1;
-            int depth = 1;
-            index++;
-            while (!isEnd()) {
-                char current = current();
-                if (current == '"') {
-                    parseString();
-                    continue;
-                }
-                if (current == '#' || startsWith("//")) {
-                    skipLineComment();
-                    continue;
-                }
-                if (startsWith("/*")) {
-                    skipBlockComment();
-                    continue;
-                }
-                if (current == open) {
-                    depth++;
-                    index++;
-                    continue;
-                }
-                if (current == close) {
-                    depth--;
-                    if (depth == 0) {
-                        String body = text.substring(start, index);
-                        index++;
-                        return body;
-                    }
-                    index++;
-                    continue;
-                }
-                index++;
-            }
-            return text.substring(start);
-        }
-
-        private void skipWhitespaceAndComments() {
-            while (!isEnd()) {
-                char current = current();
-                if (Character.isWhitespace(current)) {
-                    index++;
-                    continue;
-                }
-                if (current == '#') {
-                    skipLineComment();
-                    continue;
-                }
-                if (startsWith("//")) {
-                    skipLineComment();
-                    continue;
-                }
-                if (startsWith("/*")) {
-                    skipBlockComment();
-                    continue;
-                }
-                return;
-            }
-        }
-
-        private void skipLineComment() {
-            while (!isEnd()) {
-                char current = current();
-                index++;
-                if (current == '\n') {
-                    return;
-                }
-            }
-        }
-
-        private void skipBlockComment() {
-            index += 2;
-            while (!isEnd()) {
-                if (startsWith("*/")) {
-                    index += 2;
-                    return;
-                }
-                index++;
-            }
-        }
-
-        private boolean startsWith(String value) {
-            return text.startsWith(value, index);
-        }
-
-        private boolean isIdentifierStart(char value) {
-            return Character.isLetter(value) || value == '_' || value == '-';
-        }
-
-        private boolean isIdentifierPart(char value) {
-            return Character.isLetterOrDigit(value) || value == '_' || value == '-' || value == '.';
-        }
-
-        private char current() {
-            return text.charAt(index);
-        }
-
-        private boolean isEnd() {
-            return index >= text.length();
-        }
+        return normalized;
     }
 
-    private record ParsedValue(String stringValue) {
+    private String rootMessage(Throwable throwable) {
+        Throwable current = throwable;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current.getClass().getSimpleName() + ": " + current.getMessage();
     }
 }

@@ -1,21 +1,39 @@
 package com.sailv.terraform.analysis.domain.model;
 
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.ToString;
+import lombok.experimental.Accessors;
+
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 
 /**
- * 配额检查配置。
+ * 配额资源识别配置。
  *
- * <p>表示某个 resourceType 命中后需要检查配额，以及应当调用哪个 URL。
+ * <p>当前库不会直接执行配额检查。
+ * 这个配置只用于告诉分析过程：
+ * 哪些 `resource_type` 需要进入 `t_mp_template_resource`，
+ * 以及在预制表未返回 `quota_type` 时可使用哪个默认 `quota_type`。
+ *
+ * <p>`checkUrl` 仍然保留，是因为上游配置就是 `resource_type -> url`，
+ * 后续系统如果需要基于同一份配置做实际配额校验，可以继续复用。
  */
-public record QuotaCheckRule(String resourceType, String checkUrl, String quotaType) {
+@Getter
+@ToString
+@EqualsAndHashCode
+@Accessors(fluent = true)
+public final class QuotaCheckRule {
+    private final String resourceType;
+    private final String checkUrl;
+    private final String quotaType;
 
-    public QuotaCheckRule {
-        resourceType = requireText(resourceType, "resourceType");
-        checkUrl = requireText(checkUrl, "checkUrl");
-        quotaType = normalizeNullable(quotaType);
+    public QuotaCheckRule(String resourceType, String checkUrl, String quotaType) {
+        this.resourceType = requireText(resourceType, "resourceType");
+        this.checkUrl = requireText(checkUrl, "checkUrl");
+        this.quotaType = normalizeNullable(quotaType);
     }
 
     public static QuotaCheckRule of(String resourceType, String checkUrl) {

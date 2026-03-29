@@ -1,5 +1,10 @@
 package com.sailv.terraform.analysis.domain.model;
 
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.ToString;
+import lombok.experimental.Accessors;
+
 import java.util.Objects;
 
 /**
@@ -7,20 +12,24 @@ import java.util.Objects;
  *
  * <p>迁移到内网项目时，需要由上层持久化层把数据库查询结果转成这个对象。
  */
-public record ProviderActionDefinition(
-    String providerName,
-    String actionName,
-    String resourceType,
-    String providerType,
-    String quotaType
-) {
+@Getter
+@ToString
+@EqualsAndHashCode
+@Accessors(fluent = true)
+public final class ProviderActionDefinition {
+    private final String providerName;
+    private final String actionName;
+    private final String resourceType;
+    private final String providerType;
+    private final String quotaType;
 
-    public ProviderActionDefinition {
-        providerName = requireText(providerName, "providerName");
-        actionName = requireText(actionName, "actionName");
-        resourceType = normalizeNullable(resourceType);
-        providerType = normalizeNullable(providerType);
-        quotaType = normalizeNullable(quotaType);
+    public ProviderActionDefinition(String providerName, String actionName, String resourceType, String providerType,
+                                    String quotaType) {
+        this.providerName = requireText(providerName, "providerName");
+        this.actionName = requireText(actionName, "actionName");
+        this.resourceType = normalizeNullable(resourceType);
+        this.providerType = normalizeNullable(providerType);
+        this.quotaType = normalizeNullable(quotaType);
     }
 
     private static String requireText(String value, String field) {
