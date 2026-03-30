@@ -117,7 +117,7 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
             .filter(providerName -> !validProviderNames.contains(providerName))
             .distinct()
             .forEach(providerName -> log.warn(
-                "[PROVIDER_NOT_IN_PRESET_TABLE] Skip provider insert because preset table does not contain it: {}",
+                "Skip provider insert because preset table does not contain the provider. providerName={}",
                 providerName
             ));
 

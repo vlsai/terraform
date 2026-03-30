@@ -53,7 +53,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
             return emptyResult();
         }
         if (!root.isObject()) {
-            log.warn("[INVALID_TERRAFORM_JSON] Terraform JSON root must be an object: {}", fileName);
+            log.warn("Terraform JSON root must be an object. file={}", fileName);
             return emptyResult();
         }
 
@@ -77,7 +77,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
         try {
             return OBJECT_MAPPER.readTree(inputStream);
         } catch (JsonProcessingException exception) {
-            log.warn("[INVALID_TERRAFORM_JSON] Failed to parse Terraform JSON file {}", fileName, exception);
+            log.warn("Failed to parse Terraform JSON file. file={}", fileName, exception);
             return null;
         }
     }
@@ -277,7 +277,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
     }
 
     private void logUnexpectedShape(String sectionName, String fileName, JsonNode node) {
-        log.warn("[UNEXPECTED_TERRAFORM_JSON_SECTION] Unexpected JSON node for {} in {}, nodeType={}",
+        log.warn("Unexpected Terraform JSON section shape. section={}, file={}, nodeType={}",
             sectionName, fileName, node.getNodeType());
     }
 }

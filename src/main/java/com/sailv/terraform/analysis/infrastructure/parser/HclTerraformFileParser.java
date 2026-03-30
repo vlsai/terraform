@@ -59,7 +59,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
         try {
             return parseWithHcl4j(content, fileName);
         } catch (HCLParserException | RuntimeException exception) {
-            log.warn("[HCL4J_PARSE_FAILED] Skip Terraform file because hcl4j could not parse it: {}, reason={}",
+            log.warn("Skip Terraform file because hcl4j could not parse it. file={}, reason={}",
                 fileName, rootMessage(exception));
             return emptyResult();
         }
@@ -306,12 +306,12 @@ public class HclTerraformFileParser implements TerraformFileParser {
     ) {
         String stdout = normalizeCapturedText(capturedOut);
         if (!stdout.isBlank()) {
-            log.debug("[HCL4J_STDOUT_CAPTURED] Suppressed hcl4j stdout for {}: {}", fileName, stdout);
+            log.debug("Suppressed hcl4j stdout. file={}, output={}", fileName, stdout);
         }
 
         String stderr = normalizeCapturedText(capturedErr);
         if (!stderr.isBlank()) {
-            log.debug("[HCL4J_STDERR_CAPTURED] Suppressed hcl4j stderr for {}: {}", fileName, stderr);
+            log.debug("Suppressed hcl4j stderr. file={}, output={}", fileName, stderr);
         }
     }
 
@@ -342,7 +342,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
         for (Map.Entry<String, Object> actionEntry : asObject(sectionNode).entrySet()) {
             String terraformType = normalize(actionEntry.getKey());
             if (terraformType == null) {
-                log.warn("[PROVIDER_NAME_UNRESOLVED] Could not resolve provider name from action {}: {}",
+                log.warn("Provider name could not be resolved from Terraform action. action={}, file={}",
                     actionEntry.getKey(), fileName);
                 continue;
             }

@@ -114,12 +114,12 @@ public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
         }
 
         if (moduleAggregations.isEmpty()) {
-            log.warn("[NO_TERRAFORM_FILES] No Terraform files were found in the provided zip source");
+            log.warn("No Terraform files were found in the uploaded zip source.");
             return;
         }
 
         moduleAggregations.forEach((moduleDir, moduleAggregation) -> {
-            log.debug("[MODULE_AGGREGATED] dir={}, locals={}, actionExpressions={}",
+            log.debug("Aggregated Terraform module. dir={}, locals={}, actionExpressions={}",
                 moduleDir,
                 moduleAggregation.localValues,
                 moduleAggregation.actions.stream()
@@ -200,7 +200,7 @@ public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
         if (literal != null) {
             return literal;
         }
-        log.info("[UNSUPPORTED_INTEGER_EXPRESSION] Unsupported {} expression {} in {}",
+        log.info("Unsupported integer expression. field={}, expression={}, source={}",
             fieldName, expression, sourceName);
         return null;
     }
@@ -220,14 +220,14 @@ public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
         if (normalizedExpression.startsWith("local.")) {
             String localName = normalizedExpression.substring("local.".length());
             if (!visitedLocals.add(localName)) {
-                log.warn("[LOCAL_REFERENCE_CYCLE] Detected local reference cycle for {} in {}",
+                log.warn("Detected local reference cycle. localName={}, source={}",
                     localName, sourceName);
                 return null;
             }
 
             String localValue = localValues.get(localName);
             if (localValue == null) {
-                log.warn("[LOCAL_VALUE_NOT_FOUND] Could not resolve {} expression {} in {}",
+                log.warn("Local value not found while resolving expression. field={}, expression={}, source={}",
                     fieldName, normalizedExpression, sourceName);
                 return null;
             }
@@ -235,8 +235,7 @@ public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
         }
 
         if (looksLikeUnsupportedExpression(normalizedExpression)) {
-            log.info("[UNSUPPORTED_{}_EXPRESSION] Unsupported {} expression {} in {}",
-                fieldName.toUpperCase(Locale.ROOT),
+            log.info("Unsupported expression. field={}, expression={}, source={}",
                 fieldName,
                 normalizedExpression,
                 sourceName);

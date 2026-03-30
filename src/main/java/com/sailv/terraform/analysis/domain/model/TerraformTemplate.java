@@ -160,7 +160,7 @@ public class TerraformTemplate {
             return matched;
         }
 
-        log.warn("[AMBIGUOUS_QUOTA_TYPE] Could not determine quota type for provider={}, resourceType={}, configuredQuotaTypes={}",
+        log.warn("Could not determine quota type from provider mapping. providerName={}, resourceType={}, configuredQuotaTypes={}",
             action.getProviderName(), rule.getResourceType(), rule.getQuotaType());
         return List.of();
     }
@@ -201,7 +201,7 @@ public class TerraformTemplate {
             String normalizedQuotaType = normalizeKey(quotaType);
             if (normalizedQuotaType.contains("cpu")) {
                 if (flavorSpec == null) {
-                    log.warn("[ECS_FLAVOR_NOT_RESOLVED] Skip cpu quota because flavor_id could not be resolved for provider={}",
+                    log.warn("Skip ECS cpu quota because flavorId could not be resolved. providerName={}",
                         action.getProviderName());
                     continue;
                 }
@@ -215,7 +215,7 @@ public class TerraformTemplate {
             }
             if (normalizedQuotaType.contains("ram") || normalizedQuotaType.contains("memory")) {
                 if (flavorSpec == null) {
-                    log.warn("[ECS_FLAVOR_NOT_RESOLVED] Skip ram quota because flavor_id could not be resolved for provider={}",
+                    log.warn("Skip ECS ram quota because flavorId could not be resolved. providerName={}",
                         action.getProviderName());
                     continue;
                 }
@@ -244,7 +244,7 @@ public class TerraformTemplate {
             String normalizedQuotaType = normalizeKey(quotaType);
             if (normalizedQuotaType.contains("gigabyte") || normalizedQuotaType.equals("gb")) {
                 if (action.getSystemDiskSize() == null || action.getSystemDiskSize() <= 0) {
-                    log.warn("[ECS_SYSTEM_DISK_NOT_RESOLVED] Skip EVS gigabytes quota because system disk size could not be resolved for provider={}",
+                    log.warn("Skip EVS gigabytes quota derived from ECS because systemDiskSize could not be resolved. providerName={}",
                         action.getProviderName());
                     continue;
                 }
@@ -269,7 +269,7 @@ public class TerraformTemplate {
             String normalizedQuotaType = normalizeKey(quotaType);
             if (normalizedQuotaType.contains("gigabyte") || normalizedQuotaType.equals("gb")) {
                 if (action.getVolumeSize() == null || action.getVolumeSize() <= 0) {
-                    log.warn("[EVS_SIZE_NOT_RESOLVED] Skip EVS gigabytes quota because volume size could not be resolved for provider={}",
+                    log.warn("Skip EVS gigabytes quota because volumeSize could not be resolved. providerName={}",
                         action.getProviderName());
                     continue;
                 }
@@ -372,7 +372,7 @@ public class TerraformTemplate {
             .sorted()
             .distinct()
             .forEach(providerName -> log.warn(
-                "[PROVIDER_MAPPING_NOT_FOUND] Provider was used in template but not found in preset table: {}",
+                "Provider was used in the template but was not found in the preset table. providerName={}",
                 providerName
             ));
     }
