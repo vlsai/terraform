@@ -1,4 +1,4 @@
-package com.sailv.terraform.analysis.infrastructure.parser;
+package com.sailv.terraform.analysis.application.parser;
 
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 import lombok.EqualsAndHashCode;
@@ -12,10 +12,7 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Terraform 文件解析器 SPI。
- *
- * <p>解析器只负责把文件内容翻译成领域能够理解的 provider/action/module 信息，
- * 不在这里写业务映射逻辑。
+ * Terraform file parser SPI shared by the application/service flow.
  */
 public interface TerraformFileParser {
 
@@ -32,8 +29,11 @@ public interface TerraformFileParser {
         private final List<TerraformAction> actions;
         private final List<ModuleReference> moduleReferences;
 
-        public ParseResult(Set<String> providerBlockNames, List<TerraformAction> actions,
-                           List<ModuleReference> moduleReferences) {
+        public ParseResult(
+            Set<String> providerBlockNames,
+            List<TerraformAction> actions,
+            List<ModuleReference> moduleReferences
+        ) {
             this.providerBlockNames = providerBlockNames == null ? Set.of() : Set.copyOf(providerBlockNames);
             this.actions = actions == null ? List.of() : List.copyOf(actions);
             this.moduleReferences = moduleReferences == null ? List.of() : List.copyOf(moduleReferences);

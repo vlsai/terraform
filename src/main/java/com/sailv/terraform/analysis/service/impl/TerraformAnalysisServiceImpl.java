@@ -1,5 +1,6 @@
 package com.sailv.terraform.analysis.service.impl;
 
+import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
 import com.sailv.terraform.analysis.application.TemplateSource;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
@@ -8,7 +9,6 @@ import com.sailv.terraform.analysis.gateway.TemplateAnalysisGateway;
 import com.sailv.terraform.analysis.infrastructure.archive.ZipExtractor;
 import com.sailv.terraform.analysis.infrastructure.parser.HclTerraformFileParser;
 import com.sailv.terraform.analysis.infrastructure.parser.JsonTerraformFileParser;
-import com.sailv.terraform.analysis.infrastructure.parser.TerraformFileParser;
 import com.sailv.terraform.analysis.service.TerraformAnalysisService;
 
 import java.io.IOException;

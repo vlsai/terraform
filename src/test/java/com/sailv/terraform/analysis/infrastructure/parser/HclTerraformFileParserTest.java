@@ -1,5 +1,6 @@
 package com.sailv.terraform.analysis.infrastructure.parser;
 
+import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

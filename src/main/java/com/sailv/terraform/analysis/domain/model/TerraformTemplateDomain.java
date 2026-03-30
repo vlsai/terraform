@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.domain.model;
 
-import com.sailv.terraform.analysis.infrastructure.parser.TerraformFileParser;
+import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;

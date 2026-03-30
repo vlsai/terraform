@@ -2,6 +2,7 @@ package com.sailv.terraform.analysis.infrastructure.parser;
 
 import com.bertramlabs.plugins.hcl4j.HCLParser;
 import com.bertramlabs.plugins.hcl4j.HCLParserException;
+import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 
 import java.io.IOException;
