@@ -6,7 +6,6 @@ import com.sailv.terraform.analysis.domain.model.TemplateQuotaResource;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderActionMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateProviderMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateQuotaResourceMapper;
-import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionLookupPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.TemplateProviderPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.TemplateQuotaResourcePo;
@@ -59,12 +58,7 @@ class DatabaseTemplateAnalysisGatewayTest {
         }
 
         @Override
-        public ProviderActionPo selectByProviderNameAndActionName(String providerName, String actionName) {
-            return null;
-        }
-
-        @Override
-        public List<ProviderActionPo> selectByProviderActionKeys(Collection<ProviderActionLookupPo> lookupKeys) {
+        public List<ProviderActionPo> selectByProviderNames(Collection<String> providerNames) {
             return List.of();
         }
 

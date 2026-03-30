@@ -9,40 +9,39 @@ import com.sailv.terraform.analysis.service.impl.TerraformAnalysisServiceImpl;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-class TerraformAnalysisServiceCountAggregationTest {
+class TerraformAnalysisServiceZipLocalResolutionTest {
 
     @Test
-    void shouldExpandQuotaResourceRowsByResolvedCount() throws Exception {
-        byte[] content = """
-            locals {
-              ecs_count = 3
-            }
-
-            provider "huaweicloud" {}
-
-            resource "huaweicloud_compute_instance" "web" {
-              count = local.ecs_count
-            }
-
-            resource "huaweicloud_compute_instance" "job" {
-              count = 2
-            }
-            """
-            .getBytes(StandardCharsets.UTF_8);
+    void shouldResolveLocalCountAcrossFilesInSameZipDirectory() throws Exception {
+        byte[] zipContent = buildZip(
+            "code/modules/ecs/locals.tf", """
+                locals {
+                  ecs_count = 2
+                }
+                """,
+            "code/modules/ecs/main.tf", """
+                resource "huaweicloud_compute_instance" "web" {
+                  count = local.ecs_count
+                }
+                """
+        );
 
         TerraformAnalysisService service = new TerraformAnalysisServiceImpl(new StubTemplateAnalysisGateway());
         TemplateAnalysisResult result;
-        try (ByteArrayInputStream inputStream = new ByteArrayInputStream(content)) {
+        try (ByteArrayInputStream inputStream = new ByteArrayInputStream(zipContent)) {
             result = service.analyze(
-                "template-counts",
+                "template-zip-local",
                 inputStream,
-                "main.tf",
+                "template.zip",
                 QuotaCheckRule.of(
                     QuotaCheckRule.CloudServiceRule.of("ECS", "https://quota.internal/ecs", "instance")
                 )
@@ -51,11 +50,23 @@ class TerraformAnalysisServiceCountAggregationTest {
 
         assertEquals(1, result.getProviders().size());
         assertEquals("huaweicloud_compute_instance", result.getProviders().getFirst().getProviderName());
-        assertEquals("resource", result.getProviders().getFirst().getProviderType());
         assertEquals(1, result.getQuotaResources().size());
         assertEquals("ECS", result.getQuotaResources().getFirst().getResourceType());
-        assertEquals("instance", result.getQuotaResources().getFirst().getQuotaType());
-        assertEquals(5, result.getQuotaResources().getFirst().getQuotaRequirement());
+        assertEquals(2, result.getQuotaResources().getFirst().getQuotaRequirement());
+    }
+
+    private byte[] buildZip(String firstPath, String firstContent, String secondPath, String secondContent) throws Exception {
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        try (ZipOutputStream zipOutputStream = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
+            zipOutputStream.putNextEntry(new ZipEntry(firstPath));
+            zipOutputStream.write(firstContent.getBytes(StandardCharsets.UTF_8));
+            zipOutputStream.closeEntry();
+
+            zipOutputStream.putNextEntry(new ZipEntry(secondPath));
+            zipOutputStream.write(secondContent.getBytes(StandardCharsets.UTF_8));
+            zipOutputStream.closeEntry();
+        }
+        return outputStream.toByteArray();
     }
 
     private static final class StubTemplateAnalysisGateway implements TemplateAnalysisGateway {
@@ -75,7 +86,6 @@ class TerraformAnalysisServiceCountAggregationTest {
 
         @Override
         public void save(TemplateAnalysisResult result) {
-            // 测试只验证分析结果。
         }
     }
 }

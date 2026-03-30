@@ -1,6 +1,5 @@
 package com.sailv.terraform.analysis.service;
 
-import com.sailv.terraform.analysis.application.TemplateSource;
 import com.sailv.terraform.analysis.domain.model.ProviderActionDefinition;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
@@ -9,10 +8,11 @@ import com.sailv.terraform.analysis.gateway.TemplateAnalysisGateway;
 import com.sailv.terraform.analysis.service.impl.TerraformAnalysisServiceImpl;
 import org.junit.jupiter.api.Test;
 
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -26,31 +26,33 @@ class TerraformAnalysisServiceDocsZipTest {
         assertTrue(Files.exists(archive), "docs zip archive is required for this regression test");
 
         TerraformAnalysisService service = new TerraformAnalysisServiceImpl(new StubTemplateAnalysisGateway());
-        TemplateAnalysisResult result = service.analyze(
-            "template-docs-zip",
-            TemplateSource.fromPath(archive),
-            List.of(
-                new QuotaCheckRule("huaweicloud_compute_instance", "https://quota.internal/ecs", "instance_count"),
-                new QuotaCheckRule("huaweicloud_vpc", "https://quota.internal/vpc", "instance_count"),
-                new QuotaCheckRule("huaweicloud_vpc_subnet", "https://quota.internal/vpc-subnet", "instance_count"),
-                new QuotaCheckRule("huaweicloud_networking_secgroup", "https://quota.internal/secgroup", "instance_count")
-            )
-        );
+        TemplateAnalysisResult result;
+        try (InputStream inputStream = Files.newInputStream(archive)) {
+            result = service.analyze(
+                "template-docs-zip",
+                inputStream,
+                archive.getFileName().toString(),
+                QuotaCheckRule.of(
+                    QuotaCheckRule.CloudServiceRule.of("ECS", "https://quota.internal/ecs", "instance"),
+                    QuotaCheckRule.CloudServiceRule.of("VPC", "https://quota.internal/vpc", "VPC"),
+                    QuotaCheckRule.CloudServiceRule.of("SECGROUP", "https://quota.internal/secgroup", "instance")
+                )
+            );
+        }
 
-        Set<String> providerNames = result.providers().stream()
-            .map(provider -> provider.providerName())
+        Set<String> providerNames = result.getProviders().stream()
+            .map(provider -> provider.getProviderName())
             .collect(java.util.stream.Collectors.toSet());
-        Set<String> quotaResourceTypes = result.quotaResources().stream()
-            .map(resource -> resource.resourceType())
+        Set<String> quotaResourceTypes = result.getQuotaResources().stream()
+            .map(resource -> resource.getResourceType())
             .collect(java.util.stream.Collectors.toSet());
 
         assertTrue(providerNames.contains("huaweicloud_compute_instance"));
         assertTrue(providerNames.contains("huaweicloud_cce_node"));
-        assertFalse(result.providers().isEmpty(), "production archive should resolve at least one provider");
-        assertTrue(quotaResourceTypes.contains("huaweicloud_compute_instance"));
-        assertTrue(quotaResourceTypes.contains("huaweicloud_vpc"));
-        assertTrue(quotaResourceTypes.contains("huaweicloud_vpc_subnet"));
-        assertTrue(quotaResourceTypes.contains("huaweicloud_networking_secgroup"));
+        assertFalse(result.getProviders().isEmpty(), "production archive should resolve at least one provider");
+        assertTrue(quotaResourceTypes.contains("ECS"));
+        assertTrue(quotaResourceTypes.contains("VPC"));
+        assertTrue(quotaResourceTypes.contains("SECGROUP"));
     }
 
     /**
@@ -62,14 +64,20 @@ class TerraformAnalysisServiceDocsZipTest {
     private static final class StubTemplateAnalysisGateway implements TemplateAnalysisGateway {
 
         @Override
-        public Optional<ProviderActionDefinition> findByProviderNameAndActionName(TerraformAction action) {
-            return Optional.of(new ProviderActionDefinition(
-                action.providerName(),
-                action.providerName(),
-                action.providerName(),
-                action.kind() == TerraformAction.Kind.DATA_SOURCE ? "datasource" : "resource",
-                "instance_count"
-            ));
+        public List<ProviderActionDefinition> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
+            return actions.stream()
+                .map(action -> new ProviderActionDefinition(
+                    action.getProviderName(),
+                    action.getProviderName() + ":permission",
+                    action.getProviderName().contains("compute_instance") ? "ecs"
+                        : action.getProviderName().contains("subnet") || action.getProviderName().contains("vpc") ? "vpc"
+                        : action.getProviderName().contains("secgroup") ? "secgroup"
+                        : action.getProviderName().contains("cce") ? "cce"
+                        : action.getProviderName(),
+                    action.getProviderType() == TerraformAction.ProviderType.DATA_SOURCE ? "datasource" : "resource"
+                ))
+                .distinct()
+                .toList();
         }
 
         @Override

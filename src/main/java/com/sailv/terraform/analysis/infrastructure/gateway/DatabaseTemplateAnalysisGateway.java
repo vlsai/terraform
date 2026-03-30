@@ -9,8 +9,8 @@ import com.sailv.terraform.analysis.infrastructure.database.convertor.TemplateAn
 import com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderActionMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateProviderMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateQuotaResourceMapper;
-import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionLookupPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
+import lombok.extern.log4j.Log4j2;
 
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -18,10 +18,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /**
@@ -33,17 +30,19 @@ import java.util.stream.Collectors;
  *     <li>落库 `t_mp_template_providers` / `t_mp_template_resource`</li>
  * </ul>
  *
- * <p>provider action 查询实现了批量查询和本地缓存，避免模板解析时出现重复数据库往返。
+ * <p>这里保持最直接的实现：
+ * <ul>
+ *     <li>查询时只做一次批量 providerName 查询</li>
+ *     <li>保存时直接批量插入两张结果表</li>
+ * </ul>
  */
+@Log4j2
 public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway {
-
-    private static final Logger LOGGER = Logger.getLogger(DatabaseTemplateAnalysisGateway.class.getName());
 
     private final ProviderActionMapper providerActionMapper;
     private final TemplateProviderMapper templateProviderMapper;
     private final TemplateQuotaResourceMapper templateQuotaResourceMapper;
     private final TemplateAnalysisDataConvertor convertor;
-    private final Map<String, Optional<ProviderActionDefinition>> cache = new ConcurrentHashMap<>();
 
     public DatabaseTemplateAnalysisGateway(ProviderActionMapper providerActionMapper, TemplateProviderMapper templateProviderMapper, TemplateQuotaResourceMapper templateQuotaResourceMapper) {
         this(providerActionMapper, templateProviderMapper, templateQuotaResourceMapper, TemplateAnalysisDataConvertor.INSTANCE);
@@ -57,67 +56,33 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
     }
 
     @Override
-    public Optional<ProviderActionDefinition> findByProviderNameAndActionName(TerraformAction action) {
-        Objects.requireNonNull(action, "action cannot be null");
-        String key = keyOf(action.providerName(), action.actionName());
-        Optional<ProviderActionDefinition> cached = cache.get(key);
-        if (cached != null) {
-            return cached;
-        }
-
-        ProviderActionPo po = providerActionMapper.selectByProviderNameAndActionName(action.providerName(), action.actionName());
-        Optional<ProviderActionDefinition> resolved = Optional.ofNullable(po).map(convertor::toProviderActionDefinition);
-        cache.put(key, resolved);
-        return resolved;
-    }
-
-    @Override
     public List<ProviderActionDefinition> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
         if (actions == null || actions.isEmpty()) {
             return List.of();
         }
 
-        Map<String, ProviderActionDefinition> resolved = new LinkedHashMap<>();
-        Map<String, ProviderActionLookupPo> missingLookups = new LinkedHashMap<>();
-
-        for (TerraformAction action : actions) {
-            if (action == null) {
-                continue;
-            }
-            String key = keyOf(action.providerName(), action.actionName());
-            Optional<ProviderActionDefinition> cached = cache.get(key);
-            if (cached != null) {
-                cached.ifPresent(definition -> resolved.putIfAbsent(key, definition));
-                continue;
-            }
-            missingLookups.putIfAbsent(key, convertor.toProviderActionLookupPo(action));
+        Set<String> providerNames = actions.stream()
+            .filter(Objects::nonNull)
+            .map(TerraformAction::getProviderName)
+            .filter(providerName -> providerName != null && !providerName.isBlank())
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (providerNames.isEmpty()) {
+            return List.of();
         }
 
-        if (!missingLookups.isEmpty()) {
-            Set<String> unresolvedKeys = new LinkedHashSet<>(missingLookups.keySet());
-            List<ProviderActionPo> fetched = providerActionMapper.selectByProviderActionKeys(missingLookups.values());
-            List<ProviderActionDefinition> definitions = convertor.toProviderActionDefinitions(fetched == null ? List.of() : fetched);
-            for (ProviderActionDefinition definition : definitions) {
-                String key = keyOf(definition.providerName(), definition.actionName());
-                cache.put(key, Optional.of(definition));
-                resolved.putIfAbsent(key, definition);
-                unresolvedKeys.remove(key);
-            }
-            unresolvedKeys.forEach(key -> cache.put(key, Optional.empty()));
-        }
-
-        return List.copyOf(resolved.values());
+        List<ProviderActionPo> fetched = providerActionMapper.selectByProviderNames(providerNames);
+        return convertor.toProviderActionDefinitions(fetched == null ? List.of() : fetched);
     }
 
     @Override
     public void save(TemplateAnalysisResult result) {
         Objects.requireNonNull(result, "result cannot be null");
-        List<TemplateProvider> validatedProviders = validateProvidersBeforeInsert(result.providers());
+        List<TemplateProvider> validatedProviders = validateProvidersBeforeInsert(result.getProviders());
         if (!validatedProviders.isEmpty()) {
             templateProviderMapper.insertBatch(convertor.toTemplateProviderPos(validatedProviders));
         }
-        if (!result.quotaResources().isEmpty()) {
-            templateQuotaResourceMapper.insertBatch(convertor.toTemplateQuotaResourcePos(result.quotaResources()));
+        if (result.getQuotaResources() != null && !result.getQuotaResources().isEmpty()) {
+            templateQuotaResourceMapper.insertBatch(convertor.toTemplateQuotaResourcePos(result.getQuotaResources()));
         }
     }
 
@@ -136,7 +101,7 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
         }
 
         Set<String> requestedProviderNames = orderedProviders.stream()
-            .map(TemplateProvider::providerName)
+            .map(TemplateProvider::getProviderName)
             .filter(Objects::nonNull)
             .collect(Collectors.toCollection(LinkedHashSet::new));
         if (requestedProviderNames.isEmpty()) {
@@ -147,20 +112,17 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
         Set<String> validProviderNames = new LinkedHashSet<>(existingProviderNames == null ? List.of() : existingProviderNames);
 
         orderedProviders.stream()
-            .map(TemplateProvider::providerName)
+            .map(TemplateProvider::getProviderName)
             .filter(Objects::nonNull)
             .filter(providerName -> !validProviderNames.contains(providerName))
             .distinct()
-            .forEach(providerName -> LOGGER.warning(() ->
-                "[PROVIDER_NOT_IN_PRESET_TABLE] Skip provider insert because preset table does not contain it: "
-                    + providerName));
+            .forEach(providerName -> log.warn(
+                "[PROVIDER_NOT_IN_PRESET_TABLE] Skip provider insert because preset table does not contain it: {}",
+                providerName
+            ));
 
         return orderedProviders.stream()
-            .filter(provider -> validProviderNames.contains(provider.providerName()))
+            .filter(provider -> validProviderNames.contains(provider.getProviderName()))
             .toList();
-    }
-
-    private String keyOf(String providerName, String actionName) {
-        return providerName + '\u0000' + actionName;
     }
 }

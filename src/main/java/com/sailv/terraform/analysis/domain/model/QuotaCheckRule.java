@@ -1,81 +1,115 @@
 package com.sailv.terraform.analysis.domain.model;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 import lombok.ToString;
 import lombok.experimental.Accessors;
 
-import java.util.Collection;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 /**
- * 配额资源识别配置。
+ * 配额检查规则。
  *
- * <p>当前库不会直接执行配额检查。
- * 这个配置只用于告诉分析过程：
- * 哪些 `resource_type` 需要进入 `t_mp_template_resource`，
- * 以及在预制表未返回 `quota_type` 时可使用哪个默认 `quota_type`。
+ * <p>内网项目里这份配置通常来自一段 JSON，结构是：
  *
- * <p>`checkUrl` 仍然保留，是因为上游配置就是 `resource_type -> url`，
- * 后续系统如果需要基于同一份配置做实际配额校验，可以继续复用。
+ * <pre>{@code
+ * {
+ *   "cloud_service": [
+ *     {
+ *       "resource_type": "ECS",
+ *       "endpoint": "",
+ *       "quota_type": ["instance", "cpu_count", "ram_count"]
+ *     }
+ *   ]
+ * }
+ * }</pre>
+ *
+ * <p>这里保留原始配置结构，领域层再基于 `resource_type` 建索引。
+ * 最终落库时也优先使用规则里配置的原始 `resource_type` / `quota_type`，
+ * 这样可以保持和内网配额系统配置一致的命名。
  */
 @Getter
+@Setter
+@NoArgsConstructor
 @ToString
 @EqualsAndHashCode
-@Accessors(fluent = true)
-public final class QuotaCheckRule {
-    private final String resourceType;
-    private final String checkUrl;
-    private final String quotaType;
+@Accessors(chain = true)
+public class QuotaCheckRule {
 
-    public QuotaCheckRule(String resourceType, String checkUrl, String quotaType) {
-        this.resourceType = requireText(resourceType, "resourceType");
-        this.checkUrl = requireText(checkUrl, "checkUrl");
-        this.quotaType = normalizeNullable(quotaType);
+    @JsonProperty("cloud_service")
+    private List<CloudServiceRule> cloudService = new ArrayList<>();
+
+    public static QuotaCheckRule of(CloudServiceRule... services) {
+        QuotaCheckRule rule = new QuotaCheckRule();
+        if (services != null) {
+            for (CloudServiceRule service : services) {
+                if (service != null) {
+                    rule.getCloudService().add(service);
+                }
+            }
+        }
+        return rule;
     }
 
-    public static QuotaCheckRule of(String resourceType, String checkUrl) {
-        return new QuotaCheckRule(resourceType, checkUrl, null);
-    }
-
-    public static Map<String, QuotaCheckRule> indexByResourceType(Collection<QuotaCheckRule> rules) {
-        Map<String, QuotaCheckRule> indexed = new LinkedHashMap<>();
-        if (rules == null) {
+    public Map<String, CloudServiceRule> indexByResourceType() {
+        Map<String, CloudServiceRule> indexed = new LinkedHashMap<>();
+        if (cloudService == null) {
             return indexed;
         }
-        for (QuotaCheckRule rule : rules) {
-            if (rule != null) {
-                indexed.put(rule.resourceType(), rule);
+        for (CloudServiceRule rule : cloudService) {
+            if (rule == null || rule.getResourceType() == null || rule.getResourceType().isBlank()) {
+                continue;
             }
+            indexed.put(normalizeResourceType(rule.getResourceType()), rule);
         }
         return indexed;
     }
 
-    public static Collection<QuotaCheckRule> fromMap(Map<String, String> resourceTypeToUrl) {
-        // 兼容最简单的调用方式：只有 resource_type -> url 的配置，没有 quota_type。
-        Map<String, QuotaCheckRule> rules = new LinkedHashMap<>();
-        if (resourceTypeToUrl == null) {
-            return rules.values();
-        }
-        resourceTypeToUrl.forEach((resourceType, url) -> rules.put(resourceType, QuotaCheckRule.of(resourceType, url)));
-        return rules.values();
-    }
-
-    private static String requireText(String value, String field) {
-        Objects.requireNonNull(value, field + " cannot be null");
-        String trimmed = value.trim();
-        if (trimmed.isEmpty()) {
-            throw new IllegalArgumentException(field + " cannot be blank");
-        }
-        return trimmed;
-    }
-
-    private static String normalizeNullable(String value) {
-        if (value == null || value.isBlank()) {
+    public static String normalizeResourceType(String resourceType) {
+        if (resourceType == null) {
             return null;
         }
-        return value.trim();
+        String normalized = resourceType.trim();
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        return normalized.replace('-', '_').toLowerCase(java.util.Locale.ROOT);
+    }
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @ToString
+    @EqualsAndHashCode
+    @Accessors(chain = true)
+    public static class CloudServiceRule {
+
+        @JsonProperty("resource_type")
+        private String resourceType;
+
+        private String endpoint;
+
+        @JsonProperty("quota_type")
+        private List<String> quotaType = new ArrayList<>();
+
+        public static CloudServiceRule of(String resourceType, String endpoint, String... quotaTypes) {
+            CloudServiceRule rule = new CloudServiceRule()
+                .setResourceType(resourceType)
+                .setEndpoint(endpoint);
+            if (quotaTypes != null) {
+                for (String quotaType : quotaTypes) {
+                    if (quotaType != null && !quotaType.isBlank()) {
+                        rule.getQuotaType().add(quotaType);
+                    }
+                }
+            }
+            return rule;
+        }
     }
 }

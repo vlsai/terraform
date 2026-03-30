@@ -3,6 +3,7 @@ package com.sailv.terraform.analysis.service;
 import com.sailv.terraform.analysis.domain.model.ProviderActionDefinition;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
+import com.sailv.terraform.analysis.domain.model.TemplateQuotaResource;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 import com.sailv.terraform.analysis.gateway.TemplateAnalysisGateway;
 import com.sailv.terraform.analysis.service.impl.TerraformAnalysisServiceImpl;
@@ -12,26 +13,26 @@ import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-class TerraformAnalysisServiceCountAggregationTest {
+class TerraformAnalysisServiceEcsQuotaTest {
 
     @Test
-    void shouldExpandQuotaResourceRowsByResolvedCount() throws Exception {
+    void shouldCalculateEcsAndSystemDiskQuotas() throws Exception {
         byte[] content = """
             locals {
-              ecs_count = 3
+              ecs_count = 2
+              ecs_flavor = "s6.2xlarge.4"
+              system_disk = 40
             }
 
-            provider "huaweicloud" {}
-
-            resource "huaweicloud_compute_instance" "web" {
+            resource "huaweicloud_compute_instance" "ecs" {
               count = local.ecs_count
-            }
-
-            resource "huaweicloud_compute_instance" "job" {
-              count = 2
+              flavor_id = local.ecs_flavor
+              system_disk_size = local.system_disk
             }
             """
             .getBytes(StandardCharsets.UTF_8);
@@ -40,22 +41,28 @@ class TerraformAnalysisServiceCountAggregationTest {
         TemplateAnalysisResult result;
         try (ByteArrayInputStream inputStream = new ByteArrayInputStream(content)) {
             result = service.analyze(
-                "template-counts",
+                "template-ecs-quota",
                 inputStream,
                 "main.tf",
                 QuotaCheckRule.of(
-                    QuotaCheckRule.CloudServiceRule.of("ECS", "https://quota.internal/ecs", "instance")
+                    QuotaCheckRule.CloudServiceRule.of("ECS", "https://quota.internal/ecs", "instance", "cpu_count", "ram_count"),
+                    QuotaCheckRule.CloudServiceRule.of("EVS", "https://quota.internal/evs", "volumes", "gigabytes")
                 )
             );
         }
 
-        assertEquals(1, result.getProviders().size());
-        assertEquals("huaweicloud_compute_instance", result.getProviders().getFirst().getProviderName());
-        assertEquals("resource", result.getProviders().getFirst().getProviderType());
-        assertEquals(1, result.getQuotaResources().size());
-        assertEquals("ECS", result.getQuotaResources().getFirst().getResourceType());
-        assertEquals("instance", result.getQuotaResources().getFirst().getQuotaType());
-        assertEquals(5, result.getQuotaResources().getFirst().getQuotaRequirement());
+        Map<String, Integer> quotaMap = result.getQuotaResources().stream()
+            .collect(Collectors.toMap(
+                resource -> resource.getResourceType() + ":" + resource.getQuotaType(),
+                TemplateQuotaResource::getQuotaRequirement,
+                Integer::sum
+            ));
+
+        assertEquals(2, quotaMap.get("ECS:instance"));
+        assertEquals(16, quotaMap.get("ECS:cpu_count"));
+        assertEquals(64, quotaMap.get("ECS:ram_count"));
+        assertEquals(2, quotaMap.get("EVS:volumes"));
+        assertEquals(80, quotaMap.get("EVS:gigabytes"));
     }
 
     private static final class StubTemplateAnalysisGateway implements TemplateAnalysisGateway {
@@ -63,19 +70,18 @@ class TerraformAnalysisServiceCountAggregationTest {
         @Override
         public List<ProviderActionDefinition> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
             return actions.stream()
-                .map(action -> new ProviderActionDefinition(
-                    action.getProviderName(),
-                    action.getProviderName() + ":permission",
-                    "ecs",
-                    "resource"
-                ))
+                .map(TerraformAction::getProviderName)
                 .distinct()
+                .map(providerName -> new ProviderActionDefinition()
+                    .setProviderName(providerName)
+                    .setActionName(providerName + ":permission")
+                    .setResourceType("ecs")
+                    .setProviderType("resource"))
                 .toList();
         }
 
         @Override
         public void save(TemplateAnalysisResult result) {
-            // 测试只验证分析结果。
         }
     }
 }

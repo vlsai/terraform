@@ -1,60 +1,71 @@
 package com.sailv.terraform.analysis.domain.model;
 
+import lombok.EqualsAndHashCode;
 import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 import lombok.ToString;
 import lombok.experimental.Accessors;
 
-import java.util.Objects;
-
 /**
- * 领域动作实体。
+ * 模板中实际发现的一条 Terraform 动作。
  *
- * <p>表示模板中实际发现的一条 Terraform resource / data 定义。
- * 它是 service 和 gateway 之间传递领域信息时用到的最小抽象。
+ * <p>这里的 providerName 表示 Terraform 类型本身，例如：
+ * <ul>
+ *     <li>`huaweicloud_compute_instance`</li>
+ *     <li>`huaweicloud_vpc_eip`</li>
+ *     <li>`huaweicloud_images_image`</li>
+ * </ul>
+ *
+ * <p>解析阶段只负责把动作和原始表达式收集出来；
+ * 真正的数量、规格和盘大小求值在 service 层按 module 目录汇总 locals 后再做。
  */
 @Getter
+@Setter
+@NoArgsConstructor
 @ToString
-@lombok.EqualsAndHashCode
-@Accessors(fluent = true)
-public final class TerraformAction {
-    private final String providerName;
-    private final String actionName;
-    private final String blockName;
-    private final Kind kind;
-    private final int requestedAmount;
+@Accessors(chain = true)
+@EqualsAndHashCode(of = {
+    "providerName",
+    "blockName",
+    "providerType",
+    "requestedAmount",
+    "requestedAmountExpression",
+    "flavorId",
+    "flavorIdExpression",
+    "systemDiskSize",
+    "systemDiskSizeExpression",
+    "volumeSize",
+    "volumeSizeExpression"
+})
+public class TerraformAction {
 
-    public TerraformAction(String providerName, String actionName, Kind kind) {
-        this(providerName, actionName, actionName, kind, 1);
-    }
+    private String providerName;
+    private String blockName;
+    private ProviderType providerType;
+    private int requestedAmount = 1;
+    private String requestedAmountExpression;
+    private String flavorId;
+    private String flavorIdExpression;
+    private Integer systemDiskSize;
+    private String systemDiskSizeExpression;
+    private Integer volumeSize;
+    private String volumeSizeExpression;
 
     public TerraformAction(
         String providerName,
-        String actionName,
         String blockName,
-        Kind kind,
+        ProviderType providerType,
         int requestedAmount
     ) {
-        this.providerName = requireText(providerName, "providerName");
-        this.actionName = requireText(actionName, "actionName");
-        this.blockName = requireText(blockName, "blockName");
-        this.kind = Objects.requireNonNull(kind, "kind cannot be null");
-        if (requestedAmount < 0) {
-            throw new IllegalArgumentException("requestedAmount cannot be negative");
-        }
+        this.providerName = providerName;
+        this.blockName = blockName;
+        this.providerType = providerType;
         this.requestedAmount = requestedAmount;
     }
 
-    public enum Kind {
+    public enum ProviderType {
         RESOURCE,
         DATA_SOURCE
-    }
-
-    private static String requireText(String value, String field) {
-        Objects.requireNonNull(value, field + " cannot be null");
-        String trimmed = value.trim();
-        if (trimmed.isEmpty()) {
-            throw new IllegalArgumentException(field + " cannot be blank");
-        }
-        return trimmed;
     }
 }

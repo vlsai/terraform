@@ -23,7 +23,6 @@ public class ProviderActionPo {
     private String actionName;
     private String resourceType;
     private String providerType;
-    private String quotaType;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 }

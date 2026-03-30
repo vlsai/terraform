@@ -1,6 +1,5 @@
 package com.sailv.terraform.analysis.infrastructure.database.mapper;
 
-import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionLookupPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
 
 import java.util.Collection;
@@ -13,9 +12,7 @@ import java.util.List;
  */
 public interface ProviderActionMapper {
 
-    ProviderActionPo selectByProviderNameAndActionName(String providerName, String actionName);
-
-    List<ProviderActionPo> selectByProviderActionKeys(Collection<ProviderActionLookupPo> lookupKeys);
+    List<ProviderActionPo> selectByProviderNames(Collection<String> providerNames);
 
     /**
      * 查询预制表里真实存在的 provider。
