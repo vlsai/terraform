@@ -169,9 +169,6 @@ public class TerraformTemplate {
         Map<String, List<ProviderAction>> providerActionIndex = providerActionsByProviderName == null
             ? Map.of()
             : providerActionsByProviderName;
-        Map<String, QuotaCheckRule.CloudServiceRule> quotaRuleIndex = quotaRules == null
-            ? Map.of()
-            : quotaRules.indexByResourceType();
         Map<String, ProviderType> usedProviderTypes = collectUsedProviderTypes();
 
         List<TemplateProvider> templateProvidersList = new ArrayList<>();
@@ -199,13 +196,15 @@ public class TerraformTemplate {
         }
 
         Map<QuotaResourceKey, Integer> quotaRequirements = new LinkedHashMap<>();
-        QuotaCheckRule.CloudServiceRule evsRule = quotaRuleIndex.get(EVS_RESOURCE_TYPE);
+        Map<String, List<TerraformAction>> resourceActionsByResourceType = indexResourceActionsByResourceType(providerActionIndex);
 
-        for (TerraformAction action : actions.values()) {
-            if (action == null || action.getProviderType() != ProviderType.RESOURCE) {
-                continue;
+        if (quotaRules != null && quotaRules.getCloudService() != null) {
+            for (QuotaCheckRule.CloudServiceRule rule : quotaRules.getCloudService()) {
+                if (rule == null) {
+                    continue;
+                }
+                applyQuotaRule(rule, resourceActionsByResourceType, quotaRequirements);
             }
-            collectQuotaRequirements(action, providerActionIndex, quotaRuleIndex, evsRule, quotaRequirements);
         }
 
         List<TemplateQuotaResource> quotaResourcesList = quotaRequirements.entrySet().stream()
@@ -279,45 +278,68 @@ public class TerraformTemplate {
         return hasData ? ProviderType.DATA : null;
     }
 
-    private void collectQuotaRequirements(
-        TerraformAction action,
-        Map<String, List<ProviderAction>> definitions,
-        Map<String, QuotaCheckRule.CloudServiceRule> quotaRuleIndex,
-        QuotaCheckRule.CloudServiceRule evsRule,
+    private Map<String, List<TerraformAction>> indexResourceActionsByResourceType(
+        Map<String, List<ProviderAction>> providerActionIndex
+    ) {
+        Map<String, LinkedHashSet<TerraformAction>> indexed = new LinkedHashMap<>();
+        for (TerraformAction action : actions.values()) {
+            if (action == null || action.getProviderType() != ProviderType.RESOURCE) {
+                continue;
+            }
+            if (action.getProviderName() == null || action.getProviderName().isBlank()) {
+                continue;
+            }
+
+            List<ProviderAction> providerActions = providerActionIndex.get(action.getProviderName());
+            if (providerActions == null || providerActions.isEmpty()) {
+                continue;
+            }
+
+            Set<String> mappedResourceTypes = providerActions.stream()
+                .filter(providerAction -> providerAction.getProviderType() == ProviderType.RESOURCE)
+                .map(ProviderAction::getResourceType)
+                .map(QuotaCheckRule::normalizeResourceType)
+                .filter(resourceType -> resourceType != null && !resourceType.isBlank())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+            for (String mappedResourceType : mappedResourceTypes) {
+                indexed.computeIfAbsent(mappedResourceType, ignored -> new LinkedHashSet<>()).add(action);
+            }
+        }
+
+        Map<String, List<TerraformAction>> resourceActionsByResourceType = new LinkedHashMap<>();
+        indexed.forEach((resourceType, actionSet) -> resourceActionsByResourceType.put(resourceType, new ArrayList<>(actionSet)));
+        return resourceActionsByResourceType;
+    }
+
+    private void applyQuotaRule(
+        QuotaCheckRule.CloudServiceRule rule,
+        Map<String, List<TerraformAction>> resourceActionsByResourceType,
         Map<QuotaResourceKey, Integer> quotaRequirements
     ) {
-        if (action == null || action.getProviderName() == null || action.getProviderName().isBlank()) {
+        String normalizedResourceType = QuotaCheckRule.normalizeResourceType(rule.getResourceType());
+        if (normalizedResourceType == null || normalizedResourceType.isBlank()) {
             return;
         }
 
-        List<ProviderAction> providerDefinitions = definitions.get(action.getProviderName());
-        if (providerDefinitions == null || providerDefinitions.isEmpty()) {
-            return;
-        }
-
-        Set<String> mappedResourceTypes = providerDefinitions.stream()
-            .filter(pa -> pa.getProviderType() == ProviderType.RESOURCE)
-            .map(ProviderAction::getResourceType)
-            .map(QuotaCheckRule::normalizeResourceType)
-            .filter(value -> value != null && !value.isBlank())
-            .collect(Collectors.toCollection(LinkedHashSet::new));
-
-        for (String mappedResourceType : mappedResourceTypes) {
-            QuotaCheckRule.CloudServiceRule rule = quotaRuleIndex.get(mappedResourceType);
-            if (rule == null) {
-                continue;
-            }
-
-            if (ECS_RESOURCE_TYPE.equals(mappedResourceType)) {
+        if (ECS_RESOURCE_TYPE.equals(normalizedResourceType)) {
+            for (TerraformAction action : resourceActionsByResourceType.getOrDefault(ECS_RESOURCE_TYPE, List.of())) {
                 addEcsQuotas(action, rule, quotaRequirements);
-                addEvsSystemDiskQuotasFromEcs(action, evsRule, quotaRequirements);
-                continue;
             }
-            if (EVS_RESOURCE_TYPE.equals(mappedResourceType)) {
-                addEvsVolumeQuotas(action, rule, quotaRequirements);
-                continue;
-            }
+            return;
+        }
 
+        if (EVS_RESOURCE_TYPE.equals(normalizedResourceType)) {
+            for (TerraformAction action : resourceActionsByResourceType.getOrDefault(EVS_RESOURCE_TYPE, List.of())) {
+                addEvsVolumeQuotas(action, rule, quotaRequirements);
+            }
+            for (TerraformAction action : resourceActionsByResourceType.getOrDefault(ECS_RESOURCE_TYPE, List.of())) {
+                addEvsSystemDiskQuotasFromEcs(action, rule, quotaRequirements);
+            }
+            return;
+        }
+
+        for (TerraformAction action : resourceActionsByResourceType.getOrDefault(normalizedResourceType, List.of())) {
             addGenericQuotas(action, rule, quotaRequirements);
         }
     }
