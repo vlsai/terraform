@@ -9,11 +9,12 @@ import com.sailv.terraform.analysis.gateway.TemplateAnalysisGateway;
 import com.sailv.terraform.analysis.infrastructure.parser.HclTerraformFileParser;
 import com.sailv.terraform.analysis.infrastructure.parser.JsonTerraformFileParser;
 import com.sailv.terraform.analysis.service.TerraformAnalysisService;
-import lombok.extern.log4j.Log4j2;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -26,7 +27,6 @@ import java.util.Objects;
  *     <li>委托 `TerraformTemplate.extractQuotas` 基于提取的数据和预制表生成具体的用量配额和 Provider 供存储</li>
  * </ul>
  */
-@Log4j2
 public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
 
     private final List<TerraformFileParser> parsers;
@@ -62,12 +62,26 @@ public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
             template.getActions().values()
         );
 
-        // 3. 编排领域层进行资源和数据组合分析及配额计算
-        return template.extractQuotas(quotaRules, presetActions);
+        // 3. 在进入领域计算前先按 providerName 归组，领域层只消费已经结构化的数据
+        return template.extractQuotas(quotaRules, indexProviderActions(presetActions));
     }
 
     @Override
     public void save(TemplateAnalysisResult result) {
         templateAnalysisGateway.save(result);
+    }
+
+    private Map<String, List<ProviderAction>> indexProviderActions(List<ProviderAction> providerActions) {
+        Map<String, List<ProviderAction>> indexed = new LinkedHashMap<>();
+        if (providerActions == null) {
+            return indexed;
+        }
+        for (ProviderAction providerAction : providerActions) {
+            if (providerAction == null || providerAction.getProviderName() == null || providerAction.getProviderName().isBlank()) {
+                continue;
+            }
+            indexed.computeIfAbsent(providerAction.getProviderName(), ignored -> new java.util.ArrayList<>()).add(providerAction);
+        }
+        return indexed;
     }
 }

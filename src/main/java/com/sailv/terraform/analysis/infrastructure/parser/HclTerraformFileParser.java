@@ -3,6 +3,7 @@ package com.sailv.terraform.analysis.infrastructure.parser;
 import com.bertramlabs.plugins.hcl4j.HCLParser;
 import com.bertramlabs.plugins.hcl4j.HCLParserException;
 import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
+import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 import lombok.extern.log4j.Log4j2;
 
@@ -78,8 +79,8 @@ public class HclTerraformFileParser implements TerraformFileParser {
         // 也可能表现为 `local`。这里同时兼容，避免 locals-only 文件在 zip 聚合时丢值。
         collectLocals(value(root, "locals"), localValues);
         collectLocals(value(root, "local"), localValues);
-        collectActions(value(root, "resource"), TerraformAction.ProviderType.RESOURCE, fileName, actions);
-        collectActions(value(root, "data"), TerraformAction.ProviderType.DATA_SOURCE, fileName, actions);
+        collectActions(value(root, "resource"), ProviderType.RESOURCE, fileName, actions);
+        collectActions(value(root, "data"), ProviderType.DATA, fileName, actions);
         supplementMissingTopLevelExpressions(rawContent, actions);
 
         return new ParseResult()
@@ -129,7 +130,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
         }
         for (TerraformAction action : actions) {
             if (action == null
-                || action.getProviderType() != TerraformAction.ProviderType.RESOURCE
+                || action.getProviderType() != ProviderType.RESOURCE
                 || action.getProviderName() == null
                 || action.getBlockName() == null) {
                 continue;
@@ -335,7 +336,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
 
     private void collectActions(
         Object sectionNode,
-        TerraformAction.ProviderType providerType,
+        ProviderType providerType,
         String fileName,
         List<TerraformAction> actions
     ) {
@@ -353,7 +354,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
     private void collectActionInstances(
         String terraformType,
         Object actionNode,
-        TerraformAction.ProviderType providerType,
+        ProviderType providerType,
         List<TerraformAction> actions
     ) {
         if (actionNode instanceof List<?> actionNodes) {
@@ -381,17 +382,17 @@ public class HclTerraformFileParser implements TerraformFileParser {
                 .setProviderName(terraformType)
                 .setBlockName(blockName)
                 .setProviderType(providerType)
-                .setRequestedAmount(providerType == TerraformAction.ProviderType.DATA_SOURCE ? 1 : 0)
-                .setRequestedAmountExpression(providerType == TerraformAction.ProviderType.RESOURCE
+                .setRequestedAmount(providerType == ProviderType.DATA ? 1 : 0)
+                .setRequestedAmountExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(value(attributes, "count"))
                     : null)
-                .setFlavorIdExpression(providerType == TerraformAction.ProviderType.RESOURCE
+                .setFlavorIdExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(value(attributes, "flavor_id"))
                     : null)
-                .setSystemDiskSizeExpression(providerType == TerraformAction.ProviderType.RESOURCE
+                .setSystemDiskSizeExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(value(attributes, "system_disk_size"))
                     : null)
-                .setVolumeSizeExpression(providerType == TerraformAction.ProviderType.RESOURCE
+                .setVolumeSizeExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(value(attributes, "size"))
                     : null);
             actions.add(action);

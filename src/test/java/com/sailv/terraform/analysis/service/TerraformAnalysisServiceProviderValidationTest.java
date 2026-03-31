@@ -1,6 +1,7 @@
 package com.sailv.terraform.analysis.service;
 
 import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
@@ -87,12 +88,12 @@ class TerraformAnalysisServiceProviderValidationTest {
                     .setProviderName("huaweicloud_compute_instance")
                     .setActionName("huaweicloud_compute_instance:data")
                     .setResourceType(null)
-                    .setProviderType(ProviderAction.ProviderType.DATA),
+                    .setProviderType(ProviderType.DATA),
                 new ProviderAction()
                     .setProviderName("huaweicloud_compute_instance")
                     .setActionName("huaweicloud_compute_instance:resource")
                     .setResourceType("ecs")
-                    .setProviderType(ProviderAction.ProviderType.RESOURCE)
+                    .setProviderType(ProviderType.RESOURCE)
             );
         }
 

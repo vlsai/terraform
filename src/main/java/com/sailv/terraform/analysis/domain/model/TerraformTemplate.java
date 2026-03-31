@@ -8,7 +8,6 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -49,7 +48,7 @@ public class TerraformTemplate {
         this.fileId = fileId;
         if (isZipFile(fileName)) {
             parseZip(inputStream, parsers);
-        } else if (isTerraformFile(fileName)) {
+        } else if (supportsByAnyParser(fileName, parsers)) {
             parseSingleFile(inputStream, fileName, parsers);
         } else {
             throw new IllegalArgumentException("Unsupported template source: " + fileName);
@@ -86,7 +85,7 @@ public class TerraformTemplate {
                 }
 
                 String entryName = normalizeArchivePath(entry.getName());
-                if (!isTerraformFile(entryName)) {
+                if (!supportsByAnyParser(entryName, parsers)) {
                     continue;
                 }
 
@@ -97,11 +96,6 @@ public class TerraformTemplate {
                 moduleAggregations.computeIfAbsent(parentDirectory(entryName), ignored -> new ModuleAggregation())
                     .merge(parseResult, entryName);
             }
-        }
-
-        if (moduleAggregations.isEmpty()) {
-            log.warn("No Terraform files were found in the uploaded zip source.");
-            return;
         }
 
         moduleAggregations.forEach((ignored, moduleAggregation) ->
@@ -131,9 +125,8 @@ public class TerraformTemplate {
         return fileName.toLowerCase(Locale.ROOT).endsWith(".zip");
     }
 
-    private static boolean isTerraformFile(String fileName) {
-        String normalized = fileName.toLowerCase(Locale.ROOT);
-        return normalized.endsWith(".tf") || normalized.endsWith(".tf.json");
+    private static boolean supportsByAnyParser(String fileName, List<TerraformFileParser> parsers) {
+        return parsers.stream().anyMatch(parser -> parser.supports(fileName));
     }
 
     private static String parentDirectory(String fileName) {
@@ -171,26 +164,27 @@ public class TerraformTemplate {
 
     public TemplateAnalysisResult extractQuotas(
         QuotaCheckRule quotaRules,
-        Collection<ProviderAction> dbProviderActions
+        Map<String, List<ProviderAction>> providerActionsByProviderName
     ) {
+        Map<String, List<ProviderAction>> providerActionIndex = providerActionsByProviderName == null
+            ? Map.of()
+            : providerActionsByProviderName;
         Map<String, QuotaCheckRule.CloudServiceRule> quotaRuleIndex = quotaRules == null
             ? Map.of()
             : quotaRules.indexByResourceType();
-
-        Map<String, List<ProviderAction>> definitionsByProviderName = indexProviderActions(dbProviderActions);
-        Map<String, TerraformAction.ProviderType> usedProviderTypes = collectUsedProviderTypes();
+        Map<String, ProviderType> usedProviderTypes = collectUsedProviderTypes();
 
         List<TemplateProvider> templateProvidersList = new ArrayList<>();
-        for (Map.Entry<String, TerraformAction.ProviderType> usedProvider : usedProviderTypes.entrySet()) {
+        for (Map.Entry<String, ProviderType> usedProvider : usedProviderTypes.entrySet()) {
             String providerName = usedProvider.getKey();
-            List<ProviderAction> providerRules = definitionsByProviderName.get(providerName);
+            List<ProviderAction> providerRules = providerActionIndex.get(providerName);
             if (providerRules == null || providerRules.isEmpty()) {
                 log.warn("Provider was used in the template but was not found in the preset table. providerName={}",
                     providerName);
                 continue;
             }
 
-            ProviderAction.ProviderType resolvedProviderType = resolveProviderType(
+            ProviderType resolvedProviderType = resolveProviderType(
                 usedProvider.getValue(),
                 providerRules
             );
@@ -208,10 +202,10 @@ public class TerraformTemplate {
         QuotaCheckRule.CloudServiceRule evsRule = quotaRuleIndex.get(EVS_RESOURCE_TYPE);
 
         for (TerraformAction action : actions.values()) {
-            if (action == null || action.getProviderType() != TerraformAction.ProviderType.RESOURCE) {
+            if (action == null || action.getProviderType() != ProviderType.RESOURCE) {
                 continue;
             }
-            collectQuotaRequirements(action, definitionsByProviderName, quotaRuleIndex, evsRule, quotaRequirements);
+            collectQuotaRequirements(action, providerActionIndex, quotaRuleIndex, evsRule, quotaRequirements);
         }
 
         List<TemplateQuotaResource> quotaResourcesList = quotaRequirements.entrySet().stream()
@@ -228,22 +222,8 @@ public class TerraformTemplate {
             .setQuotaResources(new ArrayList<>(quotaResourcesList));
     }
 
-    private Map<String, List<ProviderAction>> indexProviderActions(Collection<ProviderAction> dbProviderActions) {
-        Map<String, List<ProviderAction>> indexed = new LinkedHashMap<>();
-        if (dbProviderActions == null) {
-            return indexed;
-        }
-        for (ProviderAction providerAction : dbProviderActions) {
-            if (providerAction == null || providerAction.getProviderName() == null || providerAction.getProviderName().isBlank()) {
-                continue;
-            }
-            indexed.computeIfAbsent(providerAction.getProviderName(), ignored -> new ArrayList<>()).add(providerAction);
-        }
-        return indexed;
-    }
-
-    private Map<String, TerraformAction.ProviderType> collectUsedProviderTypes() {
-        Map<String, TerraformAction.ProviderType> usedProviderTypes = new LinkedHashMap<>();
+    private Map<String, ProviderType> collectUsedProviderTypes() {
+        Map<String, ProviderType> usedProviderTypes = new LinkedHashMap<>();
         for (TerraformAction action : actions.values()) {
             if (action == null || action.getProviderName() == null || action.getProviderName().isBlank()) {
                 continue;
@@ -257,27 +237,27 @@ public class TerraformTemplate {
         return usedProviderTypes;
     }
 
-    private TerraformAction.ProviderType mergeProviderTypes(
-        TerraformAction.ProviderType current,
-        TerraformAction.ProviderType next
+    private ProviderType mergeProviderTypes(
+        ProviderType current,
+        ProviderType next
     ) {
-        if (current == TerraformAction.ProviderType.RESOURCE || next == TerraformAction.ProviderType.RESOURCE) {
-            return TerraformAction.ProviderType.RESOURCE;
+        if (current == ProviderType.RESOURCE || next == ProviderType.RESOURCE) {
+            return ProviderType.RESOURCE;
         }
         return current != null ? current : next;
     }
 
-    private ProviderAction.ProviderType resolveProviderType(
-        TerraformAction.ProviderType usedProviderType,
+    private ProviderType resolveProviderType(
+        ProviderType usedProviderType,
         List<ProviderAction> providerRules
     ) {
         if (providerRules == null || providerRules.isEmpty()) {
             return null;
         }
 
-        ProviderAction.ProviderType expectedType = usedProviderType == TerraformAction.ProviderType.DATA_SOURCE
-            ? ProviderAction.ProviderType.DATA
-            : ProviderAction.ProviderType.RESOURCE;
+        ProviderType expectedType = usedProviderType == ProviderType.DATA
+            ? ProviderType.DATA
+            : ProviderType.RESOURCE;
 
         boolean hasExpectedType = providerRules.stream()
             .map(ProviderAction::getProviderType)
@@ -288,15 +268,15 @@ public class TerraformTemplate {
 
         boolean hasResource = providerRules.stream()
             .map(ProviderAction::getProviderType)
-            .anyMatch(ProviderAction.ProviderType.RESOURCE::equals);
+            .anyMatch(ProviderType.RESOURCE::equals);
         if (hasResource) {
-            return ProviderAction.ProviderType.RESOURCE;
+            return ProviderType.RESOURCE;
         }
 
         boolean hasData = providerRules.stream()
             .map(ProviderAction::getProviderType)
-            .anyMatch(ProviderAction.ProviderType.DATA::equals);
-        return hasData ? ProviderAction.ProviderType.DATA : null;
+            .anyMatch(ProviderType.DATA::equals);
+        return hasData ? ProviderType.DATA : null;
     }
 
     private void collectQuotaRequirements(
@@ -316,7 +296,7 @@ public class TerraformTemplate {
         }
 
         Set<String> mappedResourceTypes = providerDefinitions.stream()
-            .filter(pa -> pa.getProviderType() == ProviderAction.ProviderType.RESOURCE)
+            .filter(pa -> pa.getProviderType() == ProviderType.RESOURCE)
             .map(ProviderAction::getResourceType)
             .map(QuotaCheckRule::normalizeResourceType)
             .filter(value -> value != null && !value.isBlank())
@@ -411,7 +391,7 @@ public class TerraformTemplate {
             String normalizedQuotaType = normalizeKey(quotaType);
             if (normalizedQuotaType.contains("cpu")) {
                 if (flavorSpec == null) {
-                    log.warn("Skip ECS cpu quota because flavorId could not be resolved. providerName={}",
+                    log.debug("Skip ECS cpu quota because flavorId could not be resolved. providerName={}",
                         action.getProviderName());
                     continue;
                 }
@@ -425,7 +405,7 @@ public class TerraformTemplate {
             }
             if (normalizedQuotaType.contains("ram") || normalizedQuotaType.contains("memory")) {
                 if (flavorSpec == null) {
-                    log.warn("Skip ECS ram quota because flavorId could not be resolved. providerName={}",
+                    log.debug("Skip ECS ram quota because flavorId could not be resolved. providerName={}",
                         action.getProviderName());
                     continue;
                 }
@@ -454,7 +434,7 @@ public class TerraformTemplate {
             String normalizedQuotaType = normalizeKey(quotaType);
             if (normalizedQuotaType.contains("gigabyte") || normalizedQuotaType.equals("gb")) {
                 if (action.getSystemDiskSize() == null || action.getSystemDiskSize() <= 0) {
-                    log.warn("Skip EVS gigabytes quota derived from ECS because systemDiskSize could not be resolved. providerName={}",
+                    log.debug("Skip EVS gigabytes quota derived from ECS because systemDiskSize could not be resolved. providerName={}",
                         action.getProviderName());
                     continue;
                 }
@@ -479,7 +459,7 @@ public class TerraformTemplate {
             String normalizedQuotaType = normalizeKey(quotaType);
             if (normalizedQuotaType.contains("gigabyte") || normalizedQuotaType.equals("gb")) {
                 if (action.getVolumeSize() == null || action.getVolumeSize() <= 0) {
-                    log.warn("Skip EVS gigabytes quota because volumeSize could not be resolved. providerName={}",
+                    log.debug("Skip EVS gigabytes quota because volumeSize could not be resolved. providerName={}",
                         action.getProviderName());
                     continue;
                 }
@@ -630,7 +610,7 @@ public class TerraformTemplate {
                     continue;
                 }
 
-                if (action.getProviderType() == TerraformAction.ProviderType.DATA_SOURCE) {
+                if (action.getProviderType() == ProviderType.DATA) {
                     action.setRequestedAmount(1);
                     action.setRequestedAmountExpression(null);
                     resolved.add(actionWithSource);
@@ -700,7 +680,7 @@ public class TerraformTemplate {
         if (literal != null) {
             return literal;
         }
-        log.info("Unsupported integer expression. field={}, expression={}, source={}",
+        log.debug("Unsupported integer expression. field={}, expression={}, source={}",
             fieldName, expression, sourceName);
         return null;
     }
@@ -720,14 +700,14 @@ public class TerraformTemplate {
         if (normalizedExpression.startsWith("local.")) {
             String localName = normalizedExpression.substring("local.".length());
             if (!visitedLocals.add(localName)) {
-                log.warn("Detected local reference cycle. localName={}, source={}",
+                log.debug("Detected local reference cycle. localName={}, source={}",
                     localName, sourceName);
                 return null;
             }
 
             String localValue = localValues.get(localName);
             if (localValue == null) {
-                log.warn("Local value not found while resolving expression. field={}, expression={}, source={}",
+                log.debug("Local value not found while resolving expression. field={}, expression={}, source={}",
                     fieldName, normalizedExpression, sourceName);
                 return null;
             }
@@ -735,7 +715,7 @@ public class TerraformTemplate {
         }
 
         if (looksLikeUnsupportedExpression(normalizedExpression)) {
-            log.info("Unsupported expression. field={}, expression={}, source={}",
+            log.debug("Unsupported expression. field={}, expression={}, source={}",
                 fieldName,
                 normalizedExpression,
                 sourceName);

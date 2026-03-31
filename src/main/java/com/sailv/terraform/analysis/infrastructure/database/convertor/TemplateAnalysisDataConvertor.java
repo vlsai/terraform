@@ -28,7 +28,7 @@ public interface TemplateAnalysisDataConvertor {
     @Mapping(target = "providerName", expression = "java(source.getProviderName())")
     @Mapping(target = "actionName", expression = "java(source.getActionName())")
     @Mapping(target = "resourceType", expression = "java(source.getResourceType())")
-    @Mapping(target = "providerType", expression = "java(com.sailv.terraform.analysis.domain.model.ProviderAction.ProviderType.fromDbValue(source.getProviderType()))")
+    @Mapping(target = "providerType", expression = "java(com.sailv.terraform.analysis.domain.model.ProviderType.fromDbValue(source.getProviderType()))")
     ProviderAction toProviderAction(ProviderActionPo source);
 
     List<ProviderAction> toProviderActions(Collection<ProviderActionPo> sources);

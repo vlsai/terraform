@@ -1,6 +1,7 @@
 package com.sailv.terraform.analysis.service;
 
 import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
@@ -74,7 +75,7 @@ class TerraformAnalysisServiceDocsZipTest {
                         : action.getProviderName().contains("secgroup") ? "secgroup"
                         : action.getProviderName().contains("cce") ? "cce"
                         : action.getProviderName(),
-                    action.getProviderType() == TerraformAction.ProviderType.DATA_SOURCE ? ProviderAction.ProviderType.DATA : ProviderAction.ProviderType.RESOURCE
+                    action.getProviderType() == ProviderType.DATA ? ProviderType.DATA : ProviderType.RESOURCE
                 ))
                 .distinct()
                 .toList();

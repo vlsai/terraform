@@ -1,6 +1,7 @@
 package com.sailv.terraform.analysis.infrastructure.parser;
 
 import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
+import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -109,7 +110,7 @@ class JsonTerraformFileParserTest {
             .filter(action -> Objects.equals("ubuntu", action.getBlockName()))
             .findFirst()
             .orElseThrow();
-        assertEquals(TerraformAction.ProviderType.DATA_SOURCE, dataAction.getProviderType());
+        assertEquals(ProviderType.DATA, dataAction.getProviderType());
         assertEquals(1, dataAction.getRequestedAmount());
     }
 }

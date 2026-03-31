@@ -1,6 +1,7 @@
 package com.sailv.terraform.analysis.service;
 
 import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TemplateQuotaResource;
@@ -76,7 +77,7 @@ class TerraformAnalysisServiceEcsQuotaTest {
                     .setProviderName(providerName)
                     .setActionName(providerName + ":permission")
                     .setResourceType("ecs")
-                    .setProviderType(ProviderAction.ProviderType.RESOURCE))
+                    .setProviderType(ProviderType.RESOURCE))
                 .toList();
         }
 

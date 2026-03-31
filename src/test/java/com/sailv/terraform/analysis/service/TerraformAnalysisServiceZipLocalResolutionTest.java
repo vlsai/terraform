@@ -1,6 +1,7 @@
 package com.sailv.terraform.analysis.service;
 
 import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
@@ -110,7 +111,7 @@ class TerraformAnalysisServiceZipLocalResolutionTest {
                     action.getProviderName(),
                     action.getProviderName() + ":permission",
                     "ecs",
-                    ProviderAction.ProviderType.RESOURCE
+                    ProviderType.RESOURCE
                 ))
                 .distinct()
                 .toList();

@@ -18,7 +18,7 @@ import lombok.experimental.Accessors;
  * </ul>
  *
  * <p>解析阶段只负责把动作和原始表达式收集出来；
- * 真正的数量、规格和盘大小求值在 service 层按 module 目录汇总 locals 后再做。
+ * 真正的数量、规格和盘大小求值在 `TerraformTemplate` 内部按 module 目录汇总 locals 后再做。
  */
 @Getter
 @Setter
@@ -62,10 +62,5 @@ public class TerraformAction {
         this.blockName = blockName;
         this.providerType = providerType;
         this.requestedAmount = requestedAmount;
-    }
-
-    public enum ProviderType {
-        RESOURCE,
-        DATA_SOURCE
     }
 }

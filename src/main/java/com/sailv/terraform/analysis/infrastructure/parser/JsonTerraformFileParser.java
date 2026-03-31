@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
+import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 import lombok.extern.log4j.Log4j2;
 
@@ -64,8 +65,8 @@ public class JsonTerraformFileParser implements TerraformFileParser {
         collectProviderBlocks(fileName, root.path("provider"), providerBlockNames);
         collectLocals(fileName, root.path("locals"), localValues);
         collectLocals(fileName, root.path("local"), localValues);
-        collectActions(root.path("resource"), TerraformAction.ProviderType.RESOURCE, fileName, actions);
-        collectActions(root.path("data"), TerraformAction.ProviderType.DATA_SOURCE, fileName, actions);
+        collectActions(root.path("resource"), ProviderType.RESOURCE, fileName, actions);
+        collectActions(root.path("data"), ProviderType.DATA, fileName, actions);
 
         return new ParseResult()
             .setProviderBlockNames(providerBlockNames)
@@ -130,7 +131,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
 
     private void collectActions(
         JsonNode sectionNode,
-        TerraformAction.ProviderType providerType,
+        ProviderType providerType,
         String fileName,
         List<TerraformAction> actions
     ) {
@@ -144,7 +145,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
             return;
         }
         if (!sectionNode.isObject()) {
-            logUnexpectedShape(providerType == TerraformAction.ProviderType.RESOURCE ? "resource" : "data", fileName, sectionNode);
+            logUnexpectedShape(providerType == ProviderType.RESOURCE ? "resource" : "data", fileName, sectionNode);
             return;
         }
 
@@ -158,7 +159,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
     private void addActionInstances(
         String rawActionName,
         JsonNode actionNode,
-        TerraformAction.ProviderType providerType,
+        ProviderType providerType,
         List<TerraformAction> actions
     ) {
         String terraformType = normalize(rawActionName);
@@ -171,7 +172,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
                 .setProviderName(terraformType)
                 .setBlockName(terraformType)
                 .setProviderType(providerType)
-                .setRequestedAmount(providerType == TerraformAction.ProviderType.DATA_SOURCE ? 1 : 0));
+                .setRequestedAmount(providerType == ProviderType.DATA ? 1 : 0));
             return;
         }
 
@@ -188,17 +189,17 @@ public class JsonTerraformFileParser implements TerraformFileParser {
                 .setProviderName(terraformType)
                 .setBlockName(blockName)
                 .setProviderType(providerType)
-                .setRequestedAmount(providerType == TerraformAction.ProviderType.DATA_SOURCE ? 1 : 0)
-                .setRequestedAmountExpression(providerType == TerraformAction.ProviderType.RESOURCE
+                .setRequestedAmount(providerType == ProviderType.DATA ? 1 : 0)
+                .setRequestedAmountExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(readExpression(instance.getValue(), "count"))
                     : null)
-                .setFlavorIdExpression(providerType == TerraformAction.ProviderType.RESOURCE
+                .setFlavorIdExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(readExpression(instance.getValue(), "flavor_id"))
                     : null)
-                .setSystemDiskSizeExpression(providerType == TerraformAction.ProviderType.RESOURCE
+                .setSystemDiskSizeExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(readExpression(instance.getValue(), "system_disk_size"))
                     : null)
-                .setVolumeSizeExpression(providerType == TerraformAction.ProviderType.RESOURCE
+                .setVolumeSizeExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(readExpression(instance.getValue(), "size"))
                     : null);
             actions.add(action);
@@ -209,7 +210,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
                 .setProviderName(terraformType)
                 .setBlockName(terraformType)
                 .setProviderType(providerType)
-                .setRequestedAmount(providerType == TerraformAction.ProviderType.DATA_SOURCE ? 1 : 0));
+                .setRequestedAmount(providerType == ProviderType.DATA ? 1 : 0));
         }
     }
 
