@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.infrastructure.gateway;
 
-import com.sailv.terraform.analysis.domain.model.ProviderActionDefinition;
+import com.sailv.terraform.analysis.domain.model.ProviderAction;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TemplateProvider;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
@@ -13,10 +13,8 @@ import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
 import lombok.extern.log4j.Log4j2;
 
 import java.util.Collection;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -56,7 +54,7 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
     }
 
     @Override
-    public List<ProviderActionDefinition> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
+    public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
         if (actions == null || actions.isEmpty()) {
             return List.of();
         }
@@ -71,7 +69,7 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
         }
 
         List<ProviderActionPo> fetched = providerActionMapper.selectByProviderNames(providerNames);
-        return convertor.toProviderActionDefinitions(fetched == null ? List.of() : fetched);
+        return convertor.toProviderActions(fetched == null ? List.of() : fetched);
     }
 
     @Override

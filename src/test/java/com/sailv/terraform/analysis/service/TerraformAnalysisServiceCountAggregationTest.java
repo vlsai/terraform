@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.service;
 
-import com.sailv.terraform.analysis.domain.model.ProviderActionDefinition;
+import com.sailv.terraform.analysis.domain.model.ProviderAction;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
@@ -61,13 +61,13 @@ class TerraformAnalysisServiceCountAggregationTest {
     private static final class StubTemplateAnalysisGateway implements TemplateAnalysisGateway {
 
         @Override
-        public List<ProviderActionDefinition> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
+        public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
             return actions.stream()
-                .map(action -> new ProviderActionDefinition(
+                .map(action -> new ProviderAction(
                     action.getProviderName(),
                     action.getProviderName() + ":permission",
                     "ecs",
-                    "resource"
+                    ProviderAction.ProviderType.RESOURCE
                 ))
                 .distinct()
                 .toList();

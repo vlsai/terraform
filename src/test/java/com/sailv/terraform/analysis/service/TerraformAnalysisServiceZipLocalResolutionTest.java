@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.service;
 
-import com.sailv.terraform.analysis.domain.model.ProviderActionDefinition;
+import com.sailv.terraform.analysis.domain.model.ProviderAction;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
@@ -55,6 +55,38 @@ class TerraformAnalysisServiceZipLocalResolutionTest {
         assertEquals(2, result.getQuotaResources().getFirst().getQuotaRequirement());
     }
 
+    @Test
+    void shouldNotOverwriteSameBlockNameAcrossDifferentZipDirectories() throws Exception {
+        byte[] zipContent = buildZip(
+            "code/modules/ecs-a/main.tf", """
+                resource "huaweicloud_compute_instance" "web" {
+                  count = 1
+                }
+                """,
+            "code/modules/ecs-b/main.tf", """
+                resource "huaweicloud_compute_instance" "web" {
+                  count = 2
+                }
+                """
+        );
+
+        TerraformAnalysisService service = new TerraformAnalysisServiceImpl(new StubTemplateAnalysisGateway());
+        TemplateAnalysisResult result;
+        try (ByteArrayInputStream inputStream = new ByteArrayInputStream(zipContent)) {
+            result = service.analyze(
+                "template-zip-duplicate-block",
+                inputStream,
+                "template.zip",
+                QuotaCheckRule.of(
+                    QuotaCheckRule.CloudServiceRule.of("ECS", "https://quota.internal/ecs", "instance")
+                )
+            );
+        }
+
+        assertEquals(1, result.getQuotaResources().size());
+        assertEquals(3, result.getQuotaResources().getFirst().getQuotaRequirement());
+    }
+
     private byte[] buildZip(String firstPath, String firstContent, String secondPath, String secondContent) throws Exception {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         try (ZipOutputStream zipOutputStream = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
@@ -72,13 +104,13 @@ class TerraformAnalysisServiceZipLocalResolutionTest {
     private static final class StubTemplateAnalysisGateway implements TemplateAnalysisGateway {
 
         @Override
-        public List<ProviderActionDefinition> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
+        public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
             return actions.stream()
-                .map(action -> new ProviderActionDefinition(
+                .map(action -> new ProviderAction(
                     action.getProviderName(),
                     action.getProviderName() + ":permission",
                     "ecs",
-                    "resource"
+                    ProviderAction.ProviderType.RESOURCE
                 ))
                 .distinct()
                 .toList();

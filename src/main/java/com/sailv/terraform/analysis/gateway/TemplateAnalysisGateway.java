@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.gateway;
 
-import com.sailv.terraform.analysis.domain.model.ProviderActionDefinition;
+import com.sailv.terraform.analysis.domain.model.ProviderAction;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 
@@ -22,12 +22,8 @@ public interface TemplateAnalysisGateway {
 
     /**
      * 批量查询预制表定义。
-     *
-     * <p>方法名沿用内网项目中的既有命名，但当前领域分析只依赖
-     * `providerName`。预制表里的 `actionName` 仍会被查出并保留在返回值中，
-     * 只是不会再参与模板分析聚合。
      */
-    List<ProviderActionDefinition> findByProviderNameAndActionName(Collection<TerraformAction> actions);
+    List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions);
 
     void save(TemplateAnalysisResult result);
 }

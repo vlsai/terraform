@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.infrastructure.database.convertor;
 
-import com.sailv.terraform.analysis.domain.model.ProviderActionDefinition;
+import com.sailv.terraform.analysis.domain.model.ProviderAction;
 import com.sailv.terraform.analysis.domain.model.TemplateProvider;
 import com.sailv.terraform.analysis.domain.model.TemplateQuotaResource;
 import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
@@ -28,10 +28,10 @@ public interface TemplateAnalysisDataConvertor {
     @Mapping(target = "providerName", expression = "java(source.getProviderName())")
     @Mapping(target = "actionName", expression = "java(source.getActionName())")
     @Mapping(target = "resourceType", expression = "java(source.getResourceType())")
-    @Mapping(target = "providerType", expression = "java(source.getProviderType())")
-    ProviderActionDefinition toProviderActionDefinition(ProviderActionPo source);
+    @Mapping(target = "providerType", expression = "java(com.sailv.terraform.analysis.domain.model.ProviderAction.ProviderType.fromDbValue(source.getProviderType()))")
+    ProviderAction toProviderAction(ProviderActionPo source);
 
-    List<ProviderActionDefinition> toProviderActionDefinitions(Collection<ProviderActionPo> sources);
+    List<ProviderAction> toProviderActions(Collection<ProviderActionPo> sources);
 
     @Mapping(target = "id", expression = "java(randomUuid())")
     @Mapping(target = "templateId", expression = "java(source.getTemplateId())")

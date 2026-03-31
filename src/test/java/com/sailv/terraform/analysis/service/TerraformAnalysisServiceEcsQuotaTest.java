@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.service;
 
-import com.sailv.terraform.analysis.domain.model.ProviderActionDefinition;
+import com.sailv.terraform.analysis.domain.model.ProviderAction;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TemplateQuotaResource;
@@ -68,15 +68,15 @@ class TerraformAnalysisServiceEcsQuotaTest {
     private static final class StubTemplateAnalysisGateway implements TemplateAnalysisGateway {
 
         @Override
-        public List<ProviderActionDefinition> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
+        public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
             return actions.stream()
                 .map(TerraformAction::getProviderName)
                 .distinct()
-                .map(providerName -> new ProviderActionDefinition()
+                .map(providerName -> new ProviderAction()
                     .setProviderName(providerName)
                     .setActionName(providerName + ":permission")
                     .setResourceType("ecs")
-                    .setProviderType("resource"))
+                    .setProviderType(ProviderAction.ProviderType.RESOURCE))
                 .toList();
         }
 

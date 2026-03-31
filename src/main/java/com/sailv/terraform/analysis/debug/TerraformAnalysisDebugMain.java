@@ -255,7 +255,7 @@ public final class TerraformAnalysisDebugMain {
                 .setProviderName(providerName)
                 .setActionName(providerName)
                 .setResourceType(null)
-                .setProviderType("datasource")
+                .setProviderType("data")
                 .setCreateTime(LocalDateTime.now())
                 .setUpdateTime(LocalDateTime.now());
             definitions.computeIfAbsent(providerName, ignored -> new ArrayList<>()).add(po);
@@ -287,7 +287,7 @@ public final class TerraformAnalysisDebugMain {
                 .setProviderName(normalizedProvider)
                 .setActionName(normalizedProvider)
                 .setResourceType(resourceType)
-                .setProviderType("resource"));
+                .setProviderType("resource")); // Defaulting to resource in debug logic when inferred
         }
 
         private String inferResourceType(String providerName) {

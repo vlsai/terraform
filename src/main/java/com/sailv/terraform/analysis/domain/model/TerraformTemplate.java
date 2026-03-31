@@ -1,28 +1,31 @@
 package com.sailv.terraform.analysis.domain.model;
 
+import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
 import lombok.Getter;
 import lombok.extern.log4j.Log4j2;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.stream.Collectors;
 
 /**
  * 模板领域对象。
  *
- * <p>service 负责文件读取、zip entry 扫描、按目录汇总 locals；
- * 这个类只负责基于动作集合、预制表映射和配额规则生成最终入库结果。
- *
- * <p>这里有两个关键原则：
+ * <p>提供两个主要能力：
  * <ul>
- *     <li>`t_mp_provider_actions` 只负责把 `provider_name` 映射到 `resource_type` / `provider_type`</li>
- *     <li>`quota_type` 只来自配额规则配置，不再从预制表中读取</li>
+ *   <li>解析：在构造对象时，自动处理 zip 或单文件，提取局部变量并求值 Terraform 动作。</li>
+ *   <li>配额聚合：在调用 extractQuotas() 时，基于预制表映射和配额规则生成入库对象。</li>
  * </ul>
  */
 @Getter
@@ -32,67 +35,273 @@ public class TerraformTemplate {
     private static final String ECS_RESOURCE_TYPE = "ecs";
     private static final String EVS_RESOURCE_TYPE = "evs";
 
-    private final List<TerraformAction> actions = new ArrayList<>();
+    private final String fileId;
+    
+    // Key 格式为 sourceName:providerType:providerName:blockName，避免 zip 中不同目录下的同名 block 互相覆盖
+    private final Map<String, TerraformAction> actions = new LinkedHashMap<>();
 
-    public void mergeActions(Collection<TerraformAction> mergedActions) {
-        if (mergedActions == null || mergedActions.isEmpty()) {
-            return;
+    public TerraformTemplate(
+        String fileId,
+        InputStream inputStream,
+        String fileName,
+        List<TerraformFileParser> parsers
+    ) throws IOException {
+        this.fileId = fileId;
+        if (isZipFile(fileName)) {
+            parseZip(inputStream, parsers);
+        } else if (isTerraformFile(fileName)) {
+            parseSingleFile(inputStream, fileName, parsers);
+        } else {
+            throw new IllegalArgumentException("Unsupported template source: " + fileName);
         }
-        actions.addAll(mergedActions);
     }
 
-    public TemplateAnalysisResult analyze(
-        String templateId,
+    // ==========================================
+    // 1. 解析模版数据 (Parse 逻辑)
+    // ==========================================
+
+    private String buildActionKey(TerraformAction action, String sourceName) {
+        if (action == null || action.getProviderName() == null || action.getBlockName() == null) {
+            return null;
+        }
+        String normalizedSourceName = sourceName == null ? "" : sourceName;
+        return normalizedSourceName + ":" + action.getProviderType() + ":" + action.getProviderName() + ":" + action.getBlockName();
+    }
+
+    private void addAction(TerraformAction action, String sourceName) {
+        String key = buildActionKey(action, sourceName);
+        if (key == null) {
+            return;
+        }
+        actions.put(key, action);
+    }
+
+    private void parseZip(InputStream inputStream, List<TerraformFileParser> parsers) throws IOException {
+        Map<String, ModuleAggregation> moduleAggregations = new LinkedHashMap<>();
+        try (ZipInputStream zipInputStream = new ZipInputStream(inputStream)) {
+            ZipEntry entry;
+            while ((entry = zipInputStream.getNextEntry()) != null) {
+                if (entry.isDirectory()) {
+                    continue;
+                }
+
+                String entryName = normalizeArchivePath(entry.getName());
+                if (!isTerraformFile(entryName)) {
+                    continue;
+                }
+
+                byte[] content = zipInputStream.readAllBytes();
+                TerraformFileParser parser = parserFor(entryName, parsers);
+                TerraformFileParser.ParseResult parseResult = parser.parse(new ByteArrayInputStream(content), entryName);
+
+                moduleAggregations.computeIfAbsent(parentDirectory(entryName), ignored -> new ModuleAggregation())
+                    .merge(parseResult, entryName);
+            }
+        }
+
+        if (moduleAggregations.isEmpty()) {
+            log.warn("No Terraform files were found in the uploaded zip source.");
+            return;
+        }
+
+        moduleAggregations.forEach((ignored, moduleAggregation) ->
+            moduleAggregation.resolveActions().forEach(actionWithSource ->
+                addAction(actionWithSource.action, actionWithSource.sourceName))
+        );
+    }
+
+    private void parseSingleFile(InputStream inputStream, String fileName, List<TerraformFileParser> parsers) throws IOException {
+        TerraformFileParser parser = parserFor(fileName, parsers);
+        TerraformFileParser.ParseResult parseResult = parser.parse(inputStream, fileName);
+        ModuleAggregation moduleAggregation = new ModuleAggregation();
+        moduleAggregation.merge(parseResult, fileName);
+
+        moduleAggregation.resolveActions().forEach(actionWithSource ->
+            addAction(actionWithSource.action, actionWithSource.sourceName));
+    }
+
+    private static TerraformFileParser parserFor(String fileName, List<TerraformFileParser> parsers) {
+        return parsers.stream()
+            .filter(parser -> parser.supports(fileName))
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("No parser available for file " + fileName));
+    }
+
+    private static boolean isZipFile(String fileName) {
+        return fileName.toLowerCase(Locale.ROOT).endsWith(".zip");
+    }
+
+    private static boolean isTerraformFile(String fileName) {
+        String normalized = fileName.toLowerCase(Locale.ROOT);
+        return normalized.endsWith(".tf") || normalized.endsWith(".tf.json");
+    }
+
+    private static String parentDirectory(String fileName) {
+        int lastSlash = fileName.lastIndexOf('/');
+        if (lastSlash < 0) {
+            return "";
+        }
+        return fileName.substring(0, lastSlash);
+    }
+
+    private static String normalizeArchivePath(String rawEntryName) {
+        String normalized = rawEntryName == null ? "" : rawEntryName.replace('\\', '/').trim();
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        List<String> segments = new ArrayList<>();
+        for (String segment : normalized.split("/")) {
+            if (segment.isBlank() || ".".equals(segment)) {
+                continue;
+            }
+            if ("..".equals(segment)) {
+                if (!segments.isEmpty()) {
+                    segments.removeLast();
+                }
+                continue;
+            }
+            segments.add(segment);
+        }
+        return String.join("/", segments);
+    }
+
+    // ==========================================
+    // 2. 生成配额 (Quota Generation 逻辑)
+    // ==========================================
+
+    public TemplateAnalysisResult extractQuotas(
         QuotaCheckRule quotaRules,
-        Collection<ProviderActionDefinition> providerActionDefinitions
+        Collection<ProviderAction> dbProviderActions
     ) {
         Map<String, QuotaCheckRule.CloudServiceRule> quotaRuleIndex = quotaRules == null
             ? Map.of()
             : quotaRules.indexByResourceType();
-        Map<String, List<ProviderActionDefinition>> definitions = indexDefinitions(providerActionDefinitions);
-        logMissingProviders(actions, definitions.keySet());
 
-        Set<String> usedProviders = actions.stream()
-            .map(TerraformAction::getProviderName)
-            .filter(value -> value != null && !value.isBlank())
-            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        Map<String, List<ProviderAction>> definitionsByProviderName = indexProviderActions(dbProviderActions);
+        Map<String, TerraformAction.ProviderType> usedProviderTypes = collectUsedProviderTypes();
 
-        List<TemplateProvider> providers = usedProviders.stream()
-            .sorted()
-            .filter(definitions::containsKey)
-            .map(providerName -> new TemplateProvider()
-                .setTemplateId(templateId)
+        List<TemplateProvider> templateProvidersList = new ArrayList<>();
+        for (Map.Entry<String, TerraformAction.ProviderType> usedProvider : usedProviderTypes.entrySet()) {
+            String providerName = usedProvider.getKey();
+            List<ProviderAction> providerRules = definitionsByProviderName.get(providerName);
+            if (providerRules == null || providerRules.isEmpty()) {
+                log.warn("Provider was used in the template but was not found in the preset table. providerName={}",
+                    providerName);
+                continue;
+            }
+
+            ProviderAction.ProviderType resolvedProviderType = resolveProviderType(
+                usedProvider.getValue(),
+                providerRules
+            );
+            if (resolvedProviderType == null) {
+                continue;
+            }
+
+            templateProvidersList.add(new TemplateProvider()
+                .setTemplateId(fileId)
                 .setProviderName(providerName)
-                .setProviderType(resolveProviderType(providerName, definitions.get(providerName))))
-            .toList();
+                .setProviderType(resolvedProviderType.getDbValue()));
+        }
 
         Map<QuotaResourceKey, Integer> quotaRequirements = new LinkedHashMap<>();
         QuotaCheckRule.CloudServiceRule evsRule = quotaRuleIndex.get(EVS_RESOURCE_TYPE);
 
-        actions.stream()
-            .sorted(Comparator.comparing(TerraformAction::getProviderName, Comparator.nullsLast(String::compareTo))
-                .thenComparing(TerraformAction::getBlockName, Comparator.nullsLast(String::compareTo)))
-            .forEach(action -> collectQuotaRequirements(action, definitions, quotaRuleIndex, evsRule, quotaRequirements));
+        for (TerraformAction action : actions.values()) {
+            if (action == null || action.getProviderType() != TerraformAction.ProviderType.RESOURCE) {
+                continue;
+            }
+            collectQuotaRequirements(action, definitionsByProviderName, quotaRuleIndex, evsRule, quotaRequirements);
+        }
 
-        List<TemplateQuotaResource> quotaResources = quotaRequirements.entrySet().stream()
+        List<TemplateQuotaResource> quotaResourcesList = quotaRequirements.entrySet().stream()
             .map(entry -> new TemplateQuotaResource()
-                .setTemplateId(templateId)
+                .setTemplateId(fileId)
                 .setResourceType(entry.getKey().resourceType)
                 .setQuotaType(entry.getKey().quotaType)
                 .setQuotaRequirement(entry.getValue()))
-            .sorted(Comparator.comparing(TemplateQuotaResource::getResourceType)
-                .thenComparing(TemplateQuotaResource::getQuotaType))
             .toList();
 
         return new TemplateAnalysisResult()
-            .setTemplateId(templateId)
-            .setProviders(new ArrayList<>(providers))
-            .setQuotaResources(new ArrayList<>(quotaResources));
+            .setTemplateId(fileId)
+            .setProviders(templateProvidersList)
+            .setQuotaResources(new ArrayList<>(quotaResourcesList));
+    }
+
+    private Map<String, List<ProviderAction>> indexProviderActions(Collection<ProviderAction> dbProviderActions) {
+        Map<String, List<ProviderAction>> indexed = new LinkedHashMap<>();
+        if (dbProviderActions == null) {
+            return indexed;
+        }
+        for (ProviderAction providerAction : dbProviderActions) {
+            if (providerAction == null || providerAction.getProviderName() == null || providerAction.getProviderName().isBlank()) {
+                continue;
+            }
+            indexed.computeIfAbsent(providerAction.getProviderName(), ignored -> new ArrayList<>()).add(providerAction);
+        }
+        return indexed;
+    }
+
+    private Map<String, TerraformAction.ProviderType> collectUsedProviderTypes() {
+        Map<String, TerraformAction.ProviderType> usedProviderTypes = new LinkedHashMap<>();
+        for (TerraformAction action : actions.values()) {
+            if (action == null || action.getProviderName() == null || action.getProviderName().isBlank()) {
+                continue;
+            }
+            usedProviderTypes.merge(
+                action.getProviderName(),
+                action.getProviderType(),
+                this::mergeProviderTypes
+            );
+        }
+        return usedProviderTypes;
+    }
+
+    private TerraformAction.ProviderType mergeProviderTypes(
+        TerraformAction.ProviderType current,
+        TerraformAction.ProviderType next
+    ) {
+        if (current == TerraformAction.ProviderType.RESOURCE || next == TerraformAction.ProviderType.RESOURCE) {
+            return TerraformAction.ProviderType.RESOURCE;
+        }
+        return current != null ? current : next;
+    }
+
+    private ProviderAction.ProviderType resolveProviderType(
+        TerraformAction.ProviderType usedProviderType,
+        List<ProviderAction> providerRules
+    ) {
+        if (providerRules == null || providerRules.isEmpty()) {
+            return null;
+        }
+
+        ProviderAction.ProviderType expectedType = usedProviderType == TerraformAction.ProviderType.DATA_SOURCE
+            ? ProviderAction.ProviderType.DATA
+            : ProviderAction.ProviderType.RESOURCE;
+
+        boolean hasExpectedType = providerRules.stream()
+            .map(ProviderAction::getProviderType)
+            .anyMatch(expectedType::equals);
+        if (hasExpectedType) {
+            return expectedType;
+        }
+
+        boolean hasResource = providerRules.stream()
+            .map(ProviderAction::getProviderType)
+            .anyMatch(ProviderAction.ProviderType.RESOURCE::equals);
+        if (hasResource) {
+            return ProviderAction.ProviderType.RESOURCE;
+        }
+
+        boolean hasData = providerRules.stream()
+            .map(ProviderAction::getProviderType)
+            .anyMatch(ProviderAction.ProviderType.DATA::equals);
+        return hasData ? ProviderAction.ProviderType.DATA : null;
     }
 
     private void collectQuotaRequirements(
         TerraformAction action,
-        Map<String, List<ProviderActionDefinition>> definitions,
+        Map<String, List<ProviderAction>> definitions,
         Map<String, QuotaCheckRule.CloudServiceRule> quotaRuleIndex,
         QuotaCheckRule.CloudServiceRule evsRule,
         Map<QuotaResourceKey, Integer> quotaRequirements
@@ -101,16 +310,17 @@ public class TerraformTemplate {
             return;
         }
 
-        List<ProviderActionDefinition> providerDefinitions = definitions.get(action.getProviderName());
+        List<ProviderAction> providerDefinitions = definitions.get(action.getProviderName());
         if (providerDefinitions == null || providerDefinitions.isEmpty()) {
             return;
         }
 
         Set<String> mappedResourceTypes = providerDefinitions.stream()
-            .map(ProviderActionDefinition::getResourceType)
+            .filter(pa -> pa.getProviderType() == ProviderAction.ProviderType.RESOURCE)
+            .map(ProviderAction::getResourceType)
             .map(QuotaCheckRule::normalizeResourceType)
             .filter(value -> value != null && !value.isBlank())
-            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+            .collect(Collectors.toCollection(LinkedHashSet::new));
 
         for (String mappedResourceType : mappedResourceTypes) {
             QuotaCheckRule.CloudServiceRule rule = quotaRuleIndex.get(mappedResourceType);
@@ -348,47 +558,6 @@ public class TerraformTemplate {
         quotaRequirements.merge(new QuotaResourceKey(resourceType, quotaType), amount, Integer::sum);
     }
 
-    private Map<String, List<ProviderActionDefinition>> indexDefinitions(
-        Collection<ProviderActionDefinition> providerActionDefinitions
-    ) {
-        Map<String, List<ProviderActionDefinition>> definitions = new LinkedHashMap<>();
-        if (providerActionDefinitions == null) {
-            return definitions;
-        }
-        for (ProviderActionDefinition definition : providerActionDefinitions) {
-            if (definition == null || definition.getProviderName() == null || definition.getProviderName().isBlank()) {
-                continue;
-            }
-            definitions.computeIfAbsent(definition.getProviderName(), ignored -> new ArrayList<>()).add(definition);
-        }
-        return definitions;
-    }
-
-    private void logMissingProviders(Collection<TerraformAction> usedActions, Set<String> knownProviders) {
-        usedActions.stream()
-            .map(TerraformAction::getProviderName)
-            .filter(providerName -> providerName != null && !providerName.isBlank())
-            .filter(providerName -> !knownProviders.contains(providerName))
-            .sorted()
-            .distinct()
-            .forEach(providerName -> log.warn(
-                "Provider was used in the template but was not found in the preset table. providerName={}",
-                providerName
-            ));
-    }
-
-    private String resolveProviderType(String providerName, Collection<ProviderActionDefinition> definitions) {
-        if (definitions == null) {
-            return null;
-        }
-        return definitions.stream()
-            .filter(definition -> providerName.equals(definition.getProviderName()))
-            .map(ProviderActionDefinition::getProviderType)
-            .filter(value -> value != null && !value.isBlank())
-            .findFirst()
-            .orElse(null);
-    }
-
     private String normalizeKey(String value) {
         if (value == null) {
             return "";
@@ -431,5 +600,196 @@ public class TerraformTemplate {
         public int hashCode() {
             return java.util.Objects.hash(resourceType, quotaType);
         }
+    }
+
+    // ==========================================
+    // 3. 内部解析辅助类 (原位于 Service 中)
+    // ==========================================
+
+    private static class ModuleAggregation {
+        private final Map<String, String> localValues = new LinkedHashMap<>();
+        private final List<ActionWithSource> gatheredActions = new ArrayList<>();
+
+        private void merge(TerraformFileParser.ParseResult parseResult, String sourceName) {
+            if (parseResult == null) {
+                return;
+            }
+            if (parseResult.getLocalValues() != null) {
+                parseResult.getLocalValues().forEach(localValues::put);
+            }
+            if (parseResult.getActions() != null) {
+                parseResult.getActions().forEach(action -> gatheredActions.add(new ActionWithSource(action, sourceName)));
+            }
+        }
+
+        private List<ActionWithSource> resolveActions() {
+            List<ActionWithSource> resolved = new ArrayList<>();
+            for (ActionWithSource actionWithSource : gatheredActions) {
+                TerraformAction action = actionWithSource.action;
+                if (action == null) {
+                    continue;
+                }
+
+                if (action.getProviderType() == TerraformAction.ProviderType.DATA_SOURCE) {
+                    action.setRequestedAmount(1);
+                    action.setRequestedAmountExpression(null);
+                    resolved.add(actionWithSource);
+                    continue;
+                }
+
+                int requestedAmount = resolveRequestedAmount(
+                    action.getRequestedAmountExpression(),
+                    localValues,
+                    actionWithSource.sourceName
+                );
+                if (requestedAmount <= 0) {
+                    continue;
+                }
+                action.setRequestedAmount(requestedAmount);
+                action.setFlavorId(resolveStringExpression(
+                    action.getFlavorIdExpression(),
+                    localValues,
+                    actionWithSource.sourceName,
+                    "flavor_id",
+                    new LinkedHashSet<>()
+                ));
+                action.setSystemDiskSize(resolveIntegerExpression(
+                    action.getSystemDiskSizeExpression(),
+                    localValues,
+                    actionWithSource.sourceName,
+                    "system_disk_size"
+                ));
+                action.setVolumeSize(resolveIntegerExpression(
+                    action.getVolumeSizeExpression(),
+                    localValues,
+                    actionWithSource.sourceName,
+                    "size"
+                ));
+                resolved.add(actionWithSource);
+            }
+            return resolved;
+        }
+    }
+
+    private static final class ActionWithSource {
+        private final TerraformAction action;
+        private final String sourceName;
+
+        private ActionWithSource(TerraformAction action, String sourceName) {
+            this.action = action;
+            this.sourceName = sourceName;
+        }
+    }
+
+    private static int resolveRequestedAmount(String expression, Map<String, String> localValues, String sourceName) {
+        Integer resolved = resolveIntegerExpression(expression, localValues, sourceName, "count");
+        return resolved == null ? 1 : Math.max(resolved, 0);
+    }
+
+    private static Integer resolveIntegerExpression(
+        String expression,
+        Map<String, String> localValues,
+        String sourceName,
+        String fieldName
+    ) {
+        String resolvedValue = resolveStringExpression(expression, localValues, sourceName, fieldName, new LinkedHashSet<>());
+        if (resolvedValue == null) {
+            return null;
+        }
+        Integer literal = parseLiteralIntegerHelper(resolvedValue);
+        if (literal != null) {
+            return literal;
+        }
+        log.info("Unsupported integer expression. field={}, expression={}, source={}",
+            fieldName, expression, sourceName);
+        return null;
+    }
+
+    private static String resolveStringExpression(
+        String expression,
+        Map<String, String> localValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals
+    ) {
+        String normalizedExpression = normalizeExpression(expression);
+        if (normalizedExpression == null) {
+            return null;
+        }
+
+        if (normalizedExpression.startsWith("local.")) {
+            String localName = normalizedExpression.substring("local.".length());
+            if (!visitedLocals.add(localName)) {
+                log.warn("Detected local reference cycle. localName={}, source={}",
+                    localName, sourceName);
+                return null;
+            }
+
+            String localValue = localValues.get(localName);
+            if (localValue == null) {
+                log.warn("Local value not found while resolving expression. field={}, expression={}, source={}",
+                    fieldName, normalizedExpression, sourceName);
+                return null;
+            }
+            return resolveStringExpression(localValue, localValues, sourceName, fieldName, visitedLocals);
+        }
+
+        if (looksLikeUnsupportedExpression(normalizedExpression)) {
+            log.info("Unsupported expression. field={}, expression={}, source={}",
+                fieldName,
+                normalizedExpression,
+                sourceName);
+            return null;
+        }
+
+        return normalizedExpression;
+    }
+
+    private static boolean looksLikeUnsupportedExpression(String expression) {
+        String normalized = expression == null ? null : expression.trim();
+        if (normalized == null || normalized.isEmpty()) {
+            return false;
+        }
+        return normalized.startsWith("var.")
+            || normalized.startsWith("data.")
+            || normalized.contains("?")
+            || normalized.contains("(")
+            || normalized.contains(")")
+            || normalized.contains("[")
+            || normalized.contains("]")
+            || normalized.contains("count.index")
+            || normalized.contains("each.")
+            || normalized.contains(" for ")
+            || normalized.contains("lookup(")
+            || normalized.contains("format(")
+            || normalized.contains("length(")
+            || normalized.contains("contains(")
+            || normalized.contains("keys(")
+            || normalized.contains("values(");
+    }
+
+    private static Integer parseLiteralIntegerHelper(String expression) {
+        if (!expression.chars().allMatch(character -> Character.isDigit(character) || character == '-')) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(expression);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private static String normalizeExpression(String expression) {
+        if (expression == null) {
+            return null;
+        }
+        String normalized = expression.trim();
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        if (normalized.startsWith("${") && normalized.endsWith("}")) {
+            normalized = normalized.substring(2, normalized.length() - 1).trim();
+        }
+        return normalized.isEmpty() ? null : normalized;
     }
 }
