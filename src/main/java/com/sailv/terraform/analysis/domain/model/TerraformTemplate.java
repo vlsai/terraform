@@ -16,8 +16,8 @@ import java.util.Set;
 /**
  * 模板领域对象。
  *
- * <p>service 负责文件读取、zip entry 扫描、按目录汇总 locals；
- * 这个类只负责基于动作集合、预制表映射和配额规则生成最终入库结果。
+ * <p>工厂负责文件读取、zip entry 扫描、按目录汇总 locals；
+ * 这个类只负责基于归一化后的动作集合、预制表映射和配额规则生成最终入库结果。
  *
  * <p>这里有两个关键原则：
  * <ul>
@@ -32,13 +32,12 @@ public class TerraformTemplate {
     private static final String ECS_RESOURCE_TYPE = "ecs";
     private static final String EVS_RESOURCE_TYPE = "evs";
 
-    private final List<TerraformAction> actions = new ArrayList<>();
+    private final SourceType sourceType;
+    private final List<TerraformAction> actions;
 
-    public void mergeActions(Collection<TerraformAction> mergedActions) {
-        if (mergedActions == null || mergedActions.isEmpty()) {
-            return;
-        }
-        actions.addAll(mergedActions);
+    public TerraformTemplate(SourceType sourceType, Collection<TerraformAction> actions) {
+        this.sourceType = sourceType == null ? SourceType.TF : sourceType;
+        this.actions = actions == null ? new ArrayList<>() : new ArrayList<>(actions);
     }
 
     public TemplateAnalysisResult analyze(
@@ -394,6 +393,12 @@ public class TerraformTemplate {
             return "";
         }
         return value.replace("_", "").replace("-", "").replace(" ", "").toLowerCase(Locale.ROOT);
+    }
+
+    public enum SourceType {
+        ZIP,
+        TF,
+        TF_JSON
     }
 
     private static final class FlavorSpec {
