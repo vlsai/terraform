@@ -1,5 +1,6 @@
 package com.sailv.terraform.analysis.infrastructure.database.mapper;
 
+import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
 import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
 
 import java.util.Collection;
@@ -12,7 +13,7 @@ import java.util.List;
  */
 public interface ProviderActionMapper {
 
-    List<ProviderActionPo> selectByProviderNames(Collection<String> providerNames);
+    List<ProviderActionPo> selectByProviderUsages(Collection<ProviderUsageKey> providerUsages);
 
     /**
      * 查询预制表里真实存在的 provider。
@@ -20,5 +21,5 @@ public interface ProviderActionMapper {
      * <p>保存 `t_mp_template_providers` 时需要再次校验 provider 是否仍存在于
      * `t_mp_provider_actions`，避免调用方手工构造结果对象后直接写入脏数据。
      */
-    List<String> selectExistingProviderNames(Collection<String> providerNames);
+    List<ProviderActionPo> selectExistingProviderUsages(Collection<ProviderUsageKey> providerUsages);
 }

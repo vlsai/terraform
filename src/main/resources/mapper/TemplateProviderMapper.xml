@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateProviderMapper">
+
+    <insert id="insertBatch">
+        INSERT INTO t_mp_template_providers (
+            id,
+            template_id,
+            provider_name,
+            provider_type,
+            create_time,
+            update_time
+        ) VALUES
+        <foreach collection="collection" item="provider" separator=",">
+            (
+                #{provider.id},
+                #{provider.templateId},
+                #{provider.providerName},
+                #{provider.providerType},
+                #{provider.createTime},
+                #{provider.updateTime}
+            )
+        </foreach>
+    </insert>
+</mapper>

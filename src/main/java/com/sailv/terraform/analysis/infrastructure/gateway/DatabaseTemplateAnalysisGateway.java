@@ -1,6 +1,8 @@
 package com.sailv.terraform.analysis.infrastructure.gateway;
 
 import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderType;
+import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TemplateProvider;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
@@ -11,6 +13,8 @@ import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateProvi
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateQuotaResourceMapper;
 import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
 import java.util.Collection;
 import java.util.LinkedHashSet;
@@ -35,6 +39,7 @@ import java.util.stream.Collectors;
  * </ul>
  */
 @Log4j2
+@Component
 public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway {
 
     private final ProviderActionMapper providerActionMapper;
@@ -42,15 +47,16 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
     private final TemplateQuotaResourceMapper templateQuotaResourceMapper;
     private final TemplateAnalysisDataConvertor convertor;
 
-    public DatabaseTemplateAnalysisGateway(ProviderActionMapper providerActionMapper, TemplateProviderMapper templateProviderMapper, TemplateQuotaResourceMapper templateQuotaResourceMapper) {
-        this(providerActionMapper, templateProviderMapper, templateQuotaResourceMapper, TemplateAnalysisDataConvertor.INSTANCE);
-    }
-
-    public DatabaseTemplateAnalysisGateway(ProviderActionMapper providerActionMapper, TemplateProviderMapper templateProviderMapper, TemplateQuotaResourceMapper templateQuotaResourceMapper, TemplateAnalysisDataConvertor convertor) {
+    @Autowired
+    public DatabaseTemplateAnalysisGateway(
+        ProviderActionMapper providerActionMapper,
+        TemplateProviderMapper templateProviderMapper,
+        TemplateQuotaResourceMapper templateQuotaResourceMapper
+    ) {
         this.providerActionMapper = Objects.requireNonNull(providerActionMapper, "providerActionMapper cannot be null");
         this.templateProviderMapper = Objects.requireNonNull(templateProviderMapper, "templateProviderMapper cannot be null");
         this.templateQuotaResourceMapper = Objects.requireNonNull(templateQuotaResourceMapper, "templateQuotaResourceMapper cannot be null");
-        this.convertor = Objects.requireNonNull(convertor, "convertor cannot be null");
+        this.convertor = TemplateAnalysisDataConvertor.INSTANCE;
     }
 
     @Override
@@ -59,16 +65,17 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
             return List.of();
         }
 
-        Set<String> providerNames = actions.stream()
+        Set<ProviderUsageKey> providerUsages = actions.stream()
             .filter(Objects::nonNull)
-            .map(TerraformAction::getProviderName)
-            .filter(providerName -> providerName != null && !providerName.isBlank())
+            .filter(action -> action.getProviderName() != null && !action.getProviderName().isBlank())
+            .filter(action -> action.getProviderType() != null)
+            .map(action -> new ProviderUsageKey(action.getProviderName(), action.getProviderType()))
             .collect(Collectors.toCollection(LinkedHashSet::new));
-        if (providerNames.isEmpty()) {
+        if (providerUsages.isEmpty()) {
             return List.of();
         }
 
-        List<ProviderActionPo> fetched = providerActionMapper.selectByProviderNames(providerNames);
+        List<ProviderActionPo> fetched = providerActionMapper.selectByProviderUsages(providerUsages);
         return convertor.toProviderActions(fetched == null ? List.of() : fetched);
     }
 
@@ -98,29 +105,48 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
             return List.of();
         }
 
-        Set<String> requestedProviderNames = orderedProviders.stream()
-            .map(TemplateProvider::getProviderName)
+        Set<ProviderUsageKey> requestedProviderUsages = orderedProviders.stream()
+            .filter(provider -> provider.getProviderName() != null && !provider.getProviderName().isBlank())
+            .map(convertor::toProviderUsageKey)
             .filter(Objects::nonNull)
+            .filter(usage -> usage.getProviderName() != null && !usage.getProviderName().isBlank())
+            .filter(usage -> usage.getProviderType() != null)
             .collect(Collectors.toCollection(LinkedHashSet::new));
-        if (requestedProviderNames.isEmpty()) {
+        if (requestedProviderUsages.isEmpty()) {
             return List.of();
         }
 
-        List<String> existingProviderNames = providerActionMapper.selectExistingProviderNames(requestedProviderNames);
-        Set<String> validProviderNames = new LinkedHashSet<>(existingProviderNames == null ? List.of() : existingProviderNames);
+        List<ProviderActionPo> existingProviderUsageRows = providerActionMapper.selectExistingProviderUsages(requestedProviderUsages);
+        Set<ProviderUsageKey> validProviderUsages = (existingProviderUsageRows == null ? List.<ProviderActionPo>of() : existingProviderUsageRows)
+            .stream()
+            .map(convertor::toProviderUsageKey)
+            .filter(usage -> usage.getProviderName() != null && usage.getProviderType() != null)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
 
         orderedProviders.stream()
-            .map(TemplateProvider::getProviderName)
-            .filter(Objects::nonNull)
-            .filter(providerName -> !validProviderNames.contains(providerName))
+            .map(provider -> new ProviderUsageKey(
+                provider.getProviderName(),
+                ProviderType.fromDbValue(provider.getProviderType())
+            ))
+            .filter(usage -> usage.getProviderName() != null && usage.getProviderType() != null)
+            .filter(usage -> !validProviderUsages.contains(usage))
             .distinct()
-            .forEach(providerName -> log.warn(
-                "Skip provider insert because preset table does not contain the provider. providerName={}",
-                providerName
+            .forEach(usage -> log.info(
+                "Skip provider insert because preset table does not contain the provider usage. providerName={}, providerType={}",
+                usage.getProviderName(),
+                usage.getProviderType().getDbValue()
             ));
 
+        Set<ProviderUsageKey> insertedProviderUsages = new LinkedHashSet<>();
         return orderedProviders.stream()
-            .filter(provider -> validProviderNames.contains(provider.getProviderName()))
+            .filter(provider -> validProviderUsages.contains(new ProviderUsageKey(
+                provider.getProviderName(),
+                ProviderType.fromDbValue(provider.getProviderType())
+            )))
+            .filter(provider -> insertedProviderUsages.add(new ProviderUsageKey(
+                provider.getProviderName(),
+                ProviderType.fromDbValue(provider.getProviderType())
+            )))
             .toList();
     }
 }

@@ -2,6 +2,7 @@ package com.sailv.terraform.analysis.service.impl;
 
 import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
 import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TerraformTemplate;
@@ -9,6 +10,8 @@ import com.sailv.terraform.analysis.gateway.TemplateAnalysisGateway;
 import com.sailv.terraform.analysis.infrastructure.parser.HclTerraformFileParser;
 import com.sailv.terraform.analysis.infrastructure.parser.JsonTerraformFileParser;
 import com.sailv.terraform.analysis.service.TerraformAnalysisService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -27,6 +30,7 @@ import java.util.Objects;
  *     <li>委托 `TerraformTemplate.extractQuotas` 基于提取的数据和预制表生成具体的用量配额和 Provider 供存储</li>
  * </ul>
  */
+@Service
 public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
 
     private final List<TerraformFileParser> parsers;
@@ -36,6 +40,7 @@ public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
         this(List.of(new JsonTerraformFileParser(), new HclTerraformFileParser()), templateAnalysisGateway);
     }
 
+    @Autowired
     public TerraformAnalysisServiceImpl(
         List<TerraformFileParser> parsers,
         TemplateAnalysisGateway templateAnalysisGateway
@@ -71,16 +76,20 @@ public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
         templateAnalysisGateway.save(result);
     }
 
-    private Map<String, List<ProviderAction>> indexProviderActions(List<ProviderAction> providerActions) {
-        Map<String, List<ProviderAction>> indexed = new LinkedHashMap<>();
+    private Map<ProviderUsageKey, List<ProviderAction>> indexProviderActions(List<ProviderAction> providerActions) {
+        Map<ProviderUsageKey, List<ProviderAction>> indexed = new LinkedHashMap<>();
         if (providerActions == null) {
             return indexed;
         }
         for (ProviderAction providerAction : providerActions) {
-            if (providerAction == null || providerAction.getProviderName() == null || providerAction.getProviderName().isBlank()) {
+            if (providerAction == null
+                || providerAction.getProviderName() == null
+                || providerAction.getProviderName().isBlank()
+                || providerAction.getProviderType() == null) {
                 continue;
             }
-            indexed.computeIfAbsent(providerAction.getProviderName(), ignored -> new java.util.ArrayList<>()).add(providerAction);
+            ProviderUsageKey usageKey = new ProviderUsageKey(providerAction.getProviderName(), providerAction.getProviderType());
+            indexed.computeIfAbsent(usageKey, ignored -> new java.util.ArrayList<>()).add(providerAction);
         }
         return indexed;
     }

@@ -1,11 +1,8 @@
 package com.sailv.terraform.analysis.domain.model;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.EqualsAndHashCode;
 import lombok.Getter;
-import lombok.NoArgsConstructor;
 import lombok.Setter;
-import lombok.ToString;
 import lombok.experimental.Accessors;
 
 import java.util.ArrayList;
@@ -36,9 +33,6 @@ import java.util.Map;
  */
 @Getter
 @Setter
-@NoArgsConstructor
-@ToString
-@EqualsAndHashCode
 @Accessors(chain = true)
 public class QuotaCheckRule {
 
@@ -84,9 +78,6 @@ public class QuotaCheckRule {
 
     @Getter
     @Setter
-    @NoArgsConstructor
-    @ToString
-    @EqualsAndHashCode
     @Accessors(chain = true)
     public static class CloudServiceRule {
 

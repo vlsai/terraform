@@ -1,5 +1,7 @@
 package com.sailv.terraform.analysis.infrastructure.gateway;
 
+import com.sailv.terraform.analysis.domain.model.ProviderType;
+import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TemplateProvider;
 import com.sailv.terraform.analysis.domain.model.TemplateQuotaResource;
@@ -23,7 +25,9 @@ class DatabaseTemplateAnalysisGatewayTest {
 
     @Test
     void shouldValidateProvidersAgainstPresetTableBeforeInsert() {
-        RecordingProviderActionMapper providerActionMapper = new RecordingProviderActionMapper(Set.of("huaweicloud"));
+        RecordingProviderActionMapper providerActionMapper = new RecordingProviderActionMapper(
+            Set.of(new ProviderUsageKey("huaweicloud", ProviderType.RESOURCE))
+        );
         RecordingTemplateProviderMapper templateProviderMapper = new RecordingTemplateProviderMapper();
         RecordingTemplateQuotaResourceMapper templateQuotaResourceMapper = new RecordingTemplateQuotaResourceMapper();
 
@@ -36,13 +40,19 @@ class DatabaseTemplateAnalysisGatewayTest {
         gateway.save(new TemplateAnalysisResult(
             "template-save-validation",
             List.of(
-                new TemplateProvider("template-save-validation", "huaweicloud", "huaweicloud"),
-                new TemplateProvider("template-save-validation", "unknowncloud", "unknowncloud")
+                new TemplateProvider("template-save-validation", "huaweicloud", "resource"),
+                new TemplateProvider("template-save-validation", "unknowncloud", "resource")
             ),
             List.of(new TemplateQuotaResource("template-save-validation", "ecs", "instance_count", 3))
         ));
 
-        assertEquals(Set.of("huaweicloud", "unknowncloud"), providerActionMapper.lastQueriedProviderNames);
+        assertEquals(
+            Set.of(
+                new ProviderUsageKey("huaweicloud", ProviderType.RESOURCE),
+                new ProviderUsageKey("unknowncloud", ProviderType.RESOURCE)
+            ),
+            providerActionMapper.lastQueriedProviderUsages
+        );
         assertEquals(1, templateProviderMapper.insertedProviders.size());
         assertEquals("huaweicloud", templateProviderMapper.insertedProviders.getFirst().getProviderName());
         assertEquals(1, templateQuotaResourceMapper.insertedResources.size());
@@ -50,23 +60,27 @@ class DatabaseTemplateAnalysisGatewayTest {
     }
 
     private static final class RecordingProviderActionMapper implements ProviderActionMapper {
-        private final Set<String> existingProviderNames;
-        private Set<String> lastQueriedProviderNames = Set.of();
+        private final Set<ProviderUsageKey> existingProviderUsages;
+        private Set<ProviderUsageKey> lastQueriedProviderUsages = Set.of();
 
-        private RecordingProviderActionMapper(Set<String> existingProviderNames) {
-            this.existingProviderNames = new LinkedHashSet<>(existingProviderNames);
+        private RecordingProviderActionMapper(Set<ProviderUsageKey> existingProviderUsages) {
+            this.existingProviderUsages = new LinkedHashSet<>(existingProviderUsages);
         }
 
         @Override
-        public List<ProviderActionPo> selectByProviderNames(Collection<String> providerNames) {
+        public List<ProviderActionPo> selectByProviderUsages(Collection<ProviderUsageKey> providerUsages) {
             return List.of();
         }
 
         @Override
-        public List<String> selectExistingProviderNames(Collection<String> providerNames) {
-            lastQueriedProviderNames = new LinkedHashSet<>(providerNames);
-            return providerNames.stream()
-                .filter(existingProviderNames::contains)
+        public List<ProviderActionPo> selectExistingProviderUsages(Collection<ProviderUsageKey> providerUsages) {
+            lastQueriedProviderUsages = new LinkedHashSet<>(providerUsages);
+            return providerUsages.stream()
+                .filter(existingProviderUsages::contains)
+                .map(usage -> new ProviderActionPo()
+                    .setProviderName(usage.getProviderName())
+                    .setProviderType(usage.getProviderType().getDbValue())
+                    .setIsPrimaryQuotaSubject(1))
                 .toList();
         }
     }

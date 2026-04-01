@@ -8,7 +8,9 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
 import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
+import com.sailv.terraform.analysis.domain.model.TerraformModuleCall;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -33,6 +35,7 @@ import java.util.Set;
  * 所以这里同样只保留原始表达式，不直接把数量或规格算成最终值。
  */
 @Log4j2
+@Component
 public class JsonTerraformFileParser implements TerraformFileParser {
 
     private static final ObjectMapper OBJECT_MAPPER = JsonMapper.builder()
@@ -54,23 +57,29 @@ public class JsonTerraformFileParser implements TerraformFileParser {
             return emptyResult();
         }
         if (!root.isObject()) {
-            log.warn("Terraform JSON root must be an object. file={}", fileName);
+            log.error("Terraform JSON root must be an object. file={}", fileName);
             return emptyResult();
         }
 
         Set<String> providerBlockNames = new LinkedHashSet<>();
-        Map<String, String> localValues = new LinkedHashMap<>();
+        Map<String, Object> localValues = new LinkedHashMap<>();
+        Map<String, Object> variableDefaults = new LinkedHashMap<>();
+        List<TerraformModuleCall> moduleCalls = new ArrayList<>();
         List<TerraformAction> actions = new ArrayList<>();
 
         collectProviderBlocks(fileName, root.path("provider"), providerBlockNames);
         collectLocals(fileName, root.path("locals"), localValues);
         collectLocals(fileName, root.path("local"), localValues);
+        collectVariables(fileName, root.path("variable"), variableDefaults);
+        collectModuleCalls(fileName, root.path("module"), moduleCalls);
         collectActions(root.path("resource"), ProviderType.RESOURCE, fileName, actions);
         collectActions(root.path("data"), ProviderType.DATA, fileName, actions);
 
         return new ParseResult()
             .setProviderBlockNames(providerBlockNames)
             .setLocalValues(localValues)
+            .setVariableDefaults(variableDefaults)
+            .setModuleCalls(moduleCalls)
             .setActions(actions);
     }
 
@@ -78,7 +87,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
         try {
             return OBJECT_MAPPER.readTree(inputStream);
         } catch (JsonProcessingException exception) {
-            log.warn("Failed to parse Terraform JSON file. file={}", fileName, exception);
+            log.error("Failed to parse Terraform JSON file. file={}", fileName, exception);
             return null;
         }
     }
@@ -104,7 +113,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
         providerNode.fieldNames().forEachRemaining(providerName -> addNonBlank(providerBlockNames, providerName));
     }
 
-    private void collectLocals(String fileName, JsonNode localsNode, Map<String, String> localValues) {
+    private void collectLocals(String fileName, JsonNode localsNode, Map<String, Object> localValues) {
         if (isEmpty(localsNode)) {
             return;
         }
@@ -122,10 +131,70 @@ public class JsonTerraformFileParser implements TerraformFileParser {
         Iterator<Map.Entry<String, JsonNode>> fields = localsNode.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> entry = fields.next();
-            String value = asSimpleValue(entry.getValue());
+            Object value = asStructuredValue(entry.getValue());
             if (value != null) {
                 localValues.put(entry.getKey(), value);
             }
+        }
+    }
+
+    private void collectVariables(String fileName, JsonNode variableNode, Map<String, Object> variableDefaults) {
+        if (isEmpty(variableNode)) {
+            return;
+        }
+        if (variableNode.isArray()) {
+            for (JsonNode item : variableNode) {
+                collectVariables(fileName, item, variableDefaults);
+            }
+            return;
+        }
+        if (!variableNode.isObject()) {
+            logUnexpectedShape("variable", fileName, variableNode);
+            return;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = variableNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            JsonNode defaultNode = entry.getValue().path("default");
+            if (!isEmpty(defaultNode)) {
+                variableDefaults.put(entry.getKey(), asStructuredValue(defaultNode));
+            }
+        }
+    }
+
+    private void collectModuleCalls(String fileName, JsonNode moduleNode, List<TerraformModuleCall> moduleCalls) {
+        if (isEmpty(moduleNode)) {
+            return;
+        }
+        if (moduleNode.isArray()) {
+            for (JsonNode item : moduleNode) {
+                collectModuleCalls(fileName, item, moduleCalls);
+            }
+            return;
+        }
+        if (!moduleNode.isObject()) {
+            logUnexpectedShape("module", fileName, moduleNode);
+            return;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = moduleNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            String moduleName = normalize(entry.getKey());
+            if (moduleName == null || !entry.getValue().isObject()) {
+                continue;
+            }
+            Map<String, Object> inputValues = new LinkedHashMap<>();
+            entry.getValue().fields().forEachRemaining(attribute -> {
+                if (!"source".equals(attribute.getKey())) {
+                    inputValues.put(attribute.getKey(), asStructuredValue(attribute.getValue()));
+                }
+            });
+            moduleCalls.add(new TerraformModuleCall()
+                .setModuleName(moduleName)
+                .setSource(normalizeExpression(readScalarOrJson(entry.getValue().get("source"))))
+                .setInputValues(inputValues));
         }
     }
 
@@ -231,6 +300,16 @@ public class JsonTerraformFileParser implements TerraformFileParser {
         return fieldNode.toString();
     }
 
+    private String readScalarOrJson(JsonNode node) {
+        if (isEmpty(node)) {
+            return null;
+        }
+        if (node.isTextual() || node.isNumber() || node.isBoolean()) {
+            return node.asText();
+        }
+        return node.toString();
+    }
+
     private void addNonBlank(Set<String> target, String rawValue) {
         String normalized = normalize(rawValue);
         if (normalized != null) {
@@ -238,18 +317,31 @@ public class JsonTerraformFileParser implements TerraformFileParser {
         }
     }
 
-    private String asSimpleValue(JsonNode node) {
+    private Object asStructuredValue(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return null;
         }
         if (node.isIntegralNumber()) {
-            return node.asText();
+            return node.intValue();
         }
         if (node.isFloatingPointNumber()) {
-            return node.asText();
+            return node.doubleValue();
+        }
+        if (node.isBoolean()) {
+            return node.booleanValue();
         }
         if (node.isTextual()) {
             return normalizeExpression(node.asText());
+        }
+        if (node.isArray()) {
+            List<Object> values = new ArrayList<>();
+            node.forEach(item -> values.add(asStructuredValue(item)));
+            return values;
+        }
+        if (node.isObject()) {
+            Map<String, Object> values = new LinkedHashMap<>();
+            node.fields().forEachRemaining(entry -> values.put(entry.getKey(), asStructuredValue(entry.getValue())));
+            return values;
         }
         return null;
     }
@@ -278,7 +370,7 @@ public class JsonTerraformFileParser implements TerraformFileParser {
     }
 
     private void logUnexpectedShape(String sectionName, String fileName, JsonNode node) {
-        log.warn("Unexpected Terraform JSON section shape. section={}, file={}, nodeType={}",
+        log.info("Unexpected Terraform JSON section shape. section={}, file={}, nodeType={}",
             sectionName, fileName, node.getNodeType());
     }
 }

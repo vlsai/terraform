@@ -1,11 +1,7 @@
 package com.sailv.terraform.analysis.domain.model;
 
-import lombok.AllArgsConstructor;
-import lombok.EqualsAndHashCode;
 import lombok.Getter;
-import lombok.NoArgsConstructor;
 import lombok.Setter;
-import lombok.ToString;
 import lombok.experimental.Accessors;
 
 /**
@@ -13,13 +9,18 @@ import lombok.experimental.Accessors;
  */
 @Getter
 @Setter
-@NoArgsConstructor
-@AllArgsConstructor
-@ToString
-@EqualsAndHashCode
 @Accessors(chain = true)
 public class TemplateProvider {
     private String templateId;
     private String providerName;
     private String providerType;
+
+    public TemplateProvider() {
+    }
+
+    public TemplateProvider(String templateId, String providerName, String providerType) {
+        this.templateId = templateId;
+        this.providerName = providerName;
+        this.providerType = providerType;
+    }
 }

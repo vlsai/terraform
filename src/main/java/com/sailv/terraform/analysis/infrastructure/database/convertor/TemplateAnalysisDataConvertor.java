@@ -1,6 +1,8 @@
 package com.sailv.terraform.analysis.infrastructure.database.convertor;
 
 import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderType;
+import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
 import com.sailv.terraform.analysis.domain.model.TemplateProvider;
 import com.sailv.terraform.analysis.domain.model.TemplateQuotaResource;
 import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
@@ -25,18 +27,33 @@ public interface TemplateAnalysisDataConvertor {
 
     TemplateAnalysisDataConvertor INSTANCE = Mappers.getMapper(TemplateAnalysisDataConvertor.class);
 
-    @Mapping(target = "providerName", expression = "java(source.getProviderName())")
-    @Mapping(target = "actionName", expression = "java(source.getActionName())")
-    @Mapping(target = "resourceType", expression = "java(source.getResourceType())")
-    @Mapping(target = "providerType", expression = "java(com.sailv.terraform.analysis.domain.model.ProviderType.fromDbValue(source.getProviderType()))")
+    @Mapping(target = "providerType", expression = "java(toProviderType(source.getProviderType()))")
+    @Mapping(target = "primaryQuotaSubject", expression = "java(toPrimaryQuotaSubject(source.getIsPrimaryQuotaSubject()))")
     ProviderAction toProviderAction(ProviderActionPo source);
 
     List<ProviderAction> toProviderActions(Collection<ProviderActionPo> sources);
 
+    default ProviderUsageKey toProviderUsageKey(ProviderActionPo source) {
+        if (source == null) {
+            return null;
+        }
+        return new ProviderUsageKey(
+            source.getProviderName(),
+            toProviderType(source.getProviderType())
+        );
+    }
+
+    default ProviderUsageKey toProviderUsageKey(TemplateProvider source) {
+        if (source == null) {
+            return null;
+        }
+        return new ProviderUsageKey(
+            source.getProviderName(),
+            toProviderType(source.getProviderType())
+        );
+    }
+
     @Mapping(target = "id", expression = "java(randomUuid())")
-    @Mapping(target = "templateId", expression = "java(source.getTemplateId())")
-    @Mapping(target = "providerName", expression = "java(source.getProviderName())")
-    @Mapping(target = "providerType", expression = "java(source.getProviderType())")
     @Mapping(target = "createTime", expression = "java(now())")
     @Mapping(target = "updateTime", expression = "java(now())")
     TemplateProviderPo toTemplateProviderPo(TemplateProvider source);
@@ -44,10 +61,6 @@ public interface TemplateAnalysisDataConvertor {
     List<TemplateProviderPo> toTemplateProviderPos(Collection<TemplateProvider> sources);
 
     @Mapping(target = "id", expression = "java(randomUuid())")
-    @Mapping(target = "templateId", expression = "java(source.getTemplateId())")
-    @Mapping(target = "resourceType", expression = "java(source.getResourceType())")
-    @Mapping(target = "quotaType", expression = "java(source.getQuotaType())")
-    @Mapping(target = "quotaRequirement", expression = "java(source.getQuotaRequirement())")
     @Mapping(target = "createTime", expression = "java(now())")
     @Mapping(target = "updateTime", expression = "java(now())")
     TemplateQuotaResourcePo toTemplateQuotaResourcePo(TemplateQuotaResource source);
@@ -60,5 +73,13 @@ public interface TemplateAnalysisDataConvertor {
 
     default LocalDateTime now() {
         return LocalDateTime.now();
+    }
+
+    default ProviderType toProviderType(String providerType) {
+        return ProviderType.fromDbValue(providerType);
+    }
+
+    default boolean toPrimaryQuotaSubject(Integer value) {
+        return value == null || value != 0;
     }
 }

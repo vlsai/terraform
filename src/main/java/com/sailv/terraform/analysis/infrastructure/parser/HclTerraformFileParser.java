@@ -5,12 +5,12 @@ import com.bertramlabs.plugins.hcl4j.HCLParserException;
 import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
 import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
+import com.sailv.terraform.analysis.domain.model.TerraformModuleCall;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.stereotype.Component;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -44,9 +44,8 @@ import java.util.Set;
  * 且只补顶层的少数字段，避免因为 hcl4j 在复杂表达式上的兼容差异导致这些关键字段丢失。
  */
 @Log4j2
+@Component
 public class HclTerraformFileParser implements TerraformFileParser {
-
-    private static final Object HCL4J_STDIO_LOCK = new Object();
 
     @Override
     public boolean supports(String fileName) {
@@ -60,18 +59,20 @@ public class HclTerraformFileParser implements TerraformFileParser {
         try {
             return parseWithHcl4j(content, fileName);
         } catch (HCLParserException | RuntimeException exception) {
-            log.warn("Skip Terraform file because hcl4j could not parse it. file={}, reason={}",
+            log.error("Skip Terraform file because hcl4j could not parse it. file={}, reason={}",
                 fileName, rootMessage(exception));
             return emptyResult();
         }
     }
 
     private ParseResult parseWithHcl4j(byte[] content, String fileName) throws HCLParserException, IOException {
-        Map<String, Object> root = parseRootWithCapturedOutput(content, fileName);
+        Map<String, Object> root = asObject(new HCLParser().parse(new java.io.ByteArrayInputStream(content)));
         String rawContent = new String(content, StandardCharsets.UTF_8);
 
         Set<String> providerBlockNames = new LinkedHashSet<>();
-        Map<String, String> localValues = new LinkedHashMap<>();
+        Map<String, Object> localValues = new LinkedHashMap<>();
+        Map<String, Object> variableDefaults = new LinkedHashMap<>();
+        List<TerraformModuleCall> moduleCalls = new ArrayList<>();
         List<TerraformAction> actions = new ArrayList<>();
 
         collectProviderBlocks(value(root, "provider"), providerBlockNames);
@@ -79,6 +80,8 @@ public class HclTerraformFileParser implements TerraformFileParser {
         // 也可能表现为 `local`。这里同时兼容，避免 locals-only 文件在 zip 聚合时丢值。
         collectLocals(value(root, "locals"), localValues);
         collectLocals(value(root, "local"), localValues);
+        collectVariables(value(root, "variable"), variableDefaults);
+        collectModuleCalls(value(root, "module"), moduleCalls);
         collectActions(value(root, "resource"), ProviderType.RESOURCE, fileName, actions);
         collectActions(value(root, "data"), ProviderType.DATA, fileName, actions);
         supplementMissingTopLevelExpressions(rawContent, actions);
@@ -86,30 +89,9 @@ public class HclTerraformFileParser implements TerraformFileParser {
         return new ParseResult()
             .setProviderBlockNames(providerBlockNames)
             .setLocalValues(localValues)
+            .setVariableDefaults(variableDefaults)
+            .setModuleCalls(moduleCalls)
             .setActions(actions);
-    }
-
-    private Map<String, Object> parseRootWithCapturedOutput(byte[] content, String fileName)
-        throws HCLParserException, IOException {
-        synchronized (HCL4J_STDIO_LOCK) {
-            PrintStream originalOut = System.out;
-            PrintStream originalErr = System.err;
-            ByteArrayOutputStream capturedOut = new ByteArrayOutputStream();
-            ByteArrayOutputStream capturedErr = new ByteArrayOutputStream();
-
-            try (
-                PrintStream redirectedOut = new PrintStream(capturedOut, true, StandardCharsets.UTF_8);
-                PrintStream redirectedErr = new PrintStream(capturedErr, true, StandardCharsets.UTF_8)
-            ) {
-                System.setOut(redirectedOut);
-                System.setErr(redirectedErr);
-                return asObject(new HCLParser().parse(new java.io.ByteArrayInputStream(content)));
-            } finally {
-                System.setOut(originalOut);
-                System.setErr(originalErr);
-                logCapturedLibraryOutput(fileName, capturedOut, capturedErr);
-            }
-        }
     }
 
     private ParseResult emptyResult() {
@@ -141,22 +123,18 @@ public class HclTerraformFileParser implements TerraformFileParser {
                 continue;
             }
 
-            supplementExpressionIfMissing(action::getRequestedAmountExpression, action::setRequestedAmountExpression, blockBody, "count");
-            supplementExpressionIfMissing(action::getFlavorIdExpression, action::setFlavorIdExpression, blockBody, "flavor_id");
-            supplementExpressionIfMissing(action::getSystemDiskSizeExpression, action::setSystemDiskSizeExpression, blockBody, "system_disk_size");
-            supplementExpressionIfMissing(action::getVolumeSizeExpression, action::setVolumeSizeExpression, blockBody, "size");
+            overrideExpressionFromSource(action::setRequestedAmountExpression, blockBody, "count");
+            overrideExpressionFromSource(action::setFlavorIdExpression, blockBody, "flavor_id");
+            overrideExpressionFromSource(action::setSystemDiskSizeExpression, blockBody, "system_disk_size");
+            overrideExpressionFromSource(action::setVolumeSizeExpression, blockBody, "size");
         }
     }
 
-    private void supplementExpressionIfMissing(
-        java.util.function.Supplier<String> getter,
+    private void overrideExpressionFromSource(
         java.util.function.Consumer<String> setter,
         String blockBody,
         String attributeName
     ) {
-        if (getter.get() != null) {
-            return;
-        }
         String expression = findTopLevelAttributeExpression(blockBody, attributeName);
         if (expression != null) {
             setter.accept(normalizeExpression(expression));
@@ -300,37 +278,66 @@ public class HclTerraformFileParser implements TerraformFileParser {
         return delta;
     }
 
-    private void logCapturedLibraryOutput(
-        String fileName,
-        ByteArrayOutputStream capturedOut,
-        ByteArrayOutputStream capturedErr
-    ) {
-        String stdout = normalizeCapturedText(capturedOut);
-        if (!stdout.isBlank()) {
-            log.debug("Suppressed hcl4j stdout. file={}, output={}", fileName, stdout);
-        }
-
-        String stderr = normalizeCapturedText(capturedErr);
-        if (!stderr.isBlank()) {
-            log.debug("Suppressed hcl4j stderr. file={}, output={}", fileName, stderr);
-        }
-    }
-
     private void collectProviderBlocks(Object providerNode, Set<String> providerBlockNames) {
         providerBlockNames.addAll(asObject(providerNode).keySet());
     }
 
-    private void collectLocals(Object localsNode, Map<String, String> localValues) {
+    private void collectLocals(Object localsNode, Map<String, Object> localValues) {
         if (localsNode instanceof List<?> localsList) {
             localsList.forEach(item -> collectLocals(item, localValues));
             return;
         }
 
         for (Map.Entry<String, Object> entry : asObject(localsNode).entrySet()) {
-            String literal = asSimpleValue(entry.getValue());
-            if (literal != null) {
-                localValues.put(entry.getKey(), literal);
+            Object value = asStructuredValue(entry.getValue());
+            if (value != null) {
+                localValues.put(entry.getKey(), value);
             }
+        }
+    }
+
+    private void collectVariables(Object variablesNode, Map<String, Object> variableDefaults) {
+        for (Map.Entry<String, Object> entry : asObject(variablesNode).entrySet()) {
+            Map<String, Object> variableAttributes = asObject(entry.getValue());
+            if (variableAttributes.isEmpty() && entry.getValue() instanceof List<?> variableList && !variableList.isEmpty()) {
+                variableAttributes = asObject(variableList.getFirst());
+            }
+            if (variableAttributes.isEmpty()) {
+                continue;
+            }
+            Object defaultValue = variableAttributes.get("default");
+            if (defaultValue != null) {
+                variableDefaults.put(entry.getKey(), asStructuredValue(defaultValue));
+            }
+        }
+    }
+
+    private void collectModuleCalls(Object moduleNode, List<TerraformModuleCall> moduleCalls) {
+        for (Map.Entry<String, Object> entry : asObject(moduleNode).entrySet()) {
+            String moduleName = normalize(entry.getKey());
+            if (moduleName == null) {
+                continue;
+            }
+
+            Map<String, Object> attributes = asObject(entry.getValue());
+            if (attributes.isEmpty() && entry.getValue() instanceof List<?> moduleDefinitions && !moduleDefinitions.isEmpty()) {
+                attributes = asObject(moduleDefinitions.getFirst());
+            }
+            if (attributes.isEmpty()) {
+                continue;
+            }
+
+            TerraformModuleCall moduleCall = new TerraformModuleCall()
+                .setModuleName(moduleName)
+                .setSource(normalizeExpression(attributes.get("source")));
+            Map<String, Object> inputValues = new LinkedHashMap<>();
+            attributes.forEach((attributeName, rawValue) -> {
+                if (!"source".equals(attributeName)) {
+                    inputValues.put(attributeName, asStructuredValue(rawValue));
+                }
+            });
+            moduleCall.setInputValues(inputValues);
+            moduleCalls.add(moduleCall);
         }
     }
 
@@ -343,7 +350,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
         for (Map.Entry<String, Object> actionEntry : asObject(sectionNode).entrySet()) {
             String terraformType = normalize(actionEntry.getKey());
             if (terraformType == null) {
-                log.warn("Provider name could not be resolved from Terraform action. action={}, file={}",
+                log.info("Provider name could not be resolved from Terraform action. action={}, file={}",
                     actionEntry.getKey(), fileName);
                 continue;
             }
@@ -411,17 +418,34 @@ public class HclTerraformFileParser implements TerraformFileParser {
         return map.get(key);
     }
 
-    private String asSimpleValue(Object value) {
+    private Object asStructuredValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> resolved = new LinkedHashMap<>();
+            map.forEach((key, rawChild) -> {
+                if (key != null) {
+                    resolved.put(String.valueOf(key), asStructuredValue(rawChild));
+                }
+            });
+            return resolved;
+        }
+        if (value instanceof List<?> list) {
+            List<Object> resolved = new ArrayList<>();
+            list.forEach(item -> resolved.add(asStructuredValue(item)));
+            return resolved;
+        }
         if (value instanceof Number number) {
             if (number.doubleValue() == Math.floor(number.doubleValue())) {
-                return String.valueOf(number.intValue());
+                return number.intValue();
             }
-            return stripTrailingZero(String.valueOf(number.doubleValue()));
+            return Double.parseDouble(stripTrailingZero(String.valueOf(number.doubleValue())));
+        }
+        if (value instanceof Boolean bool) {
+            return bool;
         }
         if (value instanceof String string) {
             return normalizeExpression(string);
         }
-        return null;
+        return normalizeExpression(value);
     }
 
     private String stripTrailingZero(String value) {
@@ -440,11 +464,17 @@ public class HclTerraformFileParser implements TerraformFileParser {
     }
 
     private String normalizeExpression(Object value) {
-        if (!(value instanceof String string)) {
-            if (value instanceof Number number) {
-                return String.valueOf(number.intValue());
-            }
+        if (value == null) {
             return null;
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return String.valueOf(value);
+        }
+        String string;
+        if (value instanceof String rawString) {
+            string = rawString;
+        } else {
+            string = String.valueOf(value);
         }
         String normalized = string.trim();
         if (normalized.isEmpty()) {
@@ -454,14 +484,6 @@ public class HclTerraformFileParser implements TerraformFileParser {
             normalized = normalized.substring(2, normalized.length() - 1).trim();
         }
         return normalized;
-    }
-
-    private String normalizeCapturedText(ByteArrayOutputStream buffer) {
-        String text = buffer.toString(StandardCharsets.UTF_8).trim();
-        if (text.isEmpty()) {
-            return "";
-        }
-        return text.replace(System.lineSeparator(), " | ");
     }
 
     private String rootMessage(Throwable throwable) {

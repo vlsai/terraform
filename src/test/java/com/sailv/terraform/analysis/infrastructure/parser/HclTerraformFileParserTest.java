@@ -56,7 +56,7 @@ class HclTerraformFileParserTest {
         }
 
         assertEquals(Set.of("huaweicloud"), result.getProviderBlockNames());
-        assertEquals("3", result.getLocalValues().get("ecs_count"));
+        assertEquals(3, result.getLocalValues().get("ecs_count"));
         assertEquals("s6.2xlarge.4", result.getLocalValues().get("ecs_flavor"));
 
         TerraformAction computeAction = result.getActions().stream()
@@ -65,16 +65,16 @@ class HclTerraformFileParserTest {
             .findFirst()
             .orElseThrow();
         assertEquals(ProviderType.RESOURCE, computeAction.getProviderType());
-        assertTrue(Set.of("local.ecs_count", "3").contains(computeAction.getRequestedAmountExpression()));
+        assertTrue(Set.of("local.ecs_count", "3", "3.0").contains(computeAction.getRequestedAmountExpression()));
         assertTrue(Set.of("local.ecs_flavor", "s6.2xlarge.4").contains(computeAction.getFlavorIdExpression()));
-        assertTrue(Set.of("local.system_disk", "40").contains(computeAction.getSystemDiskSizeExpression()));
+        assertTrue(Set.of("local.system_disk", "40", "40.0").contains(computeAction.getSystemDiskSizeExpression()));
 
         TerraformAction eipAction = result.getActions().stream()
             .filter(action -> Objects.equals("huaweicloud_eip", action.getProviderName()))
             .filter(action -> Objects.equals("public", action.getBlockName()))
             .findFirst()
             .orElseThrow();
-        assertEquals("2", eipAction.getRequestedAmountExpression());
+        assertTrue(Set.of("2", "2.0").contains(eipAction.getRequestedAmountExpression()));
 
         TerraformAction dataAction = result.getActions().stream()
             .filter(action -> Objects.equals("huaweicloud_images_image", action.getProviderName()))
@@ -100,6 +100,6 @@ class HclTerraformFileParserTest {
             result = parser.parse(inputStream, file.getFileName().toString());
         }
 
-        assertEquals("2", result.getLocalValues().get("ecs_count"));
+        assertEquals(2, result.getLocalValues().get("ecs_count"));
     }
 }

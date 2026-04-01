@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderActionMapper">
+
+    <resultMap id="ProviderActionPoMap" type="com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo">
+        <result property="providerName" column="provider_name"/>
+        <result property="actionName" column="action_name"/>
+        <result property="resourceType" column="resource_type"/>
+        <result property="quotaTypeHint" column="quota_type_hint"/>
+        <result property="providerType" column="provider_type"/>
+        <result property="isPrimaryQuotaSubject" column="is_primary_quota_subject"/>
+        <result property="createTime" column="create_time"/>
+        <result property="updateTime" column="update_time"/>
+    </resultMap>
+
+    <resultMap id="ProviderUsagePoMap" type="com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo">
+        <result property="providerName" column="provider_name"/>
+        <result property="providerType" column="provider_type"/>
+    </resultMap>
+
+    <select id="selectByProviderUsages" resultMap="ProviderActionPoMap">
+        SELECT
+            provider_name,
+            action_name,
+            resource_type,
+            quota_type_hint,
+            provider_type,
+            is_primary_quota_subject,
+            create_time,
+            update_time
+        FROM t_mp_provider_actions
+        <where>
+            <foreach collection="collection" item="usage" separator=" OR ">
+                (provider_name = #{usage.providerName}
+                AND provider_type = #{usage.providerType.dbValue})
+            </foreach>
+        </where>
+    </select>
+
+    <select id="selectExistingProviderUsages" resultMap="ProviderUsagePoMap">
+        SELECT DISTINCT
+            provider_name,
+            provider_type
+        FROM t_mp_provider_actions
+        <where>
+            <foreach collection="collection" item="usage" separator=" OR ">
+                (provider_name = #{usage.providerName}
+                AND provider_type = #{usage.providerType.dbValue})
+            </foreach>
+        </where>
+    </select>
+</mapper>

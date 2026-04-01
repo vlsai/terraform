@@ -1,11 +1,7 @@
 package com.sailv.terraform.analysis.domain.model;
 
-import lombok.AllArgsConstructor;
-import lombok.EqualsAndHashCode;
 import lombok.Getter;
-import lombok.NoArgsConstructor;
 import lombok.Setter;
-import lombok.ToString;
 import lombok.experimental.Accessors;
 
 /**
@@ -13,14 +9,20 @@ import lombok.experimental.Accessors;
  */
 @Getter
 @Setter
-@NoArgsConstructor
-@AllArgsConstructor
-@ToString
-@EqualsAndHashCode
 @Accessors(chain = true)
 public class TemplateQuotaResource {
     private String templateId;
     private String resourceType;
     private String quotaType;
     private int quotaRequirement;
+
+    public TemplateQuotaResource() {
+    }
+
+    public TemplateQuotaResource(String templateId, String resourceType, String quotaType, int quotaRequirement) {
+        this.templateId = templateId;
+        this.resourceType = resourceType;
+        this.quotaType = quotaType;
+        this.quotaRequirement = quotaRequirement;
+    }
 }

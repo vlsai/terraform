@@ -87,7 +87,7 @@ class JsonTerraformFileParserTest {
         }
 
         assertEquals(Set.of("huaweicloud"), result.getProviderBlockNames());
-        assertEquals("3", result.getLocalValues().get("ecs_count"));
+        assertEquals(3, result.getLocalValues().get("ecs_count"));
         assertEquals("s6.2xlarge.4", result.getLocalValues().get("ecs_flavor"));
         TerraformAction computeAction = result.getActions().stream()
             .filter(action -> Objects.equals("huaweicloud_compute_instance", action.getProviderName()))

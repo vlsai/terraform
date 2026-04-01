@@ -13,6 +13,7 @@ import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,7 +37,7 @@ class TerraformAnalysisServiceProviderValidationTest {
     }
 
     @Test
-    void shouldUnifyProviderTypeWhenPresetTableContainsResourceAndData() throws Exception {
+    void shouldKeepResourceAndDataProvidersSeparated() throws Exception {
         byte[] content = """
             data "huaweicloud_compute_instance" "lookup" {}
 
@@ -59,9 +60,13 @@ class TerraformAnalysisServiceProviderValidationTest {
             );
         }
 
-        assertEquals(1, result.getProviders().size());
-        assertEquals("huaweicloud_compute_instance", result.getProviders().getFirst().getProviderName());
-        assertEquals("resource", result.getProviders().getFirst().getProviderType());
+        assertEquals(2, result.getProviders().size());
+        assertEquals(
+            Set.of("huaweicloud_compute_instance:data", "huaweicloud_compute_instance:resource"),
+            result.getProviders().stream()
+                .map(provider -> provider.getProviderName() + ":" + provider.getProviderType())
+                .collect(java.util.stream.Collectors.toSet())
+        );
         assertEquals(1, result.getQuotaResources().size());
         assertEquals(1, result.getQuotaResources().getFirst().getQuotaRequirement());
     }

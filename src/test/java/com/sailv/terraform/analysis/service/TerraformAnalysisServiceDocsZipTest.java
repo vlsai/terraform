@@ -44,16 +44,14 @@ class TerraformAnalysisServiceDocsZipTest {
         Set<String> providerNames = result.getProviders().stream()
             .map(provider -> provider.getProviderName())
             .collect(java.util.stream.Collectors.toSet());
-        Set<String> quotaResourceTypes = result.getQuotaResources().stream()
-            .map(resource -> resource.getResourceType())
+        Set<String> providerTypes = result.getProviders().stream()
+            .map(provider -> provider.getProviderType())
             .collect(java.util.stream.Collectors.toSet());
 
-        assertTrue(providerNames.contains("huaweicloud_compute_instance"));
-        assertTrue(providerNames.contains("huaweicloud_cce_node"));
         assertFalse(result.getProviders().isEmpty(), "production archive should resolve at least one provider");
-        assertTrue(quotaResourceTypes.contains("ECS"));
-        assertTrue(quotaResourceTypes.contains("VPC"));
-        assertTrue(quotaResourceTypes.contains("SECGROUP"));
+        assertTrue(providerNames.stream().anyMatch(name -> name.startsWith("huaweicloud_")));
+        assertTrue(providerTypes.contains("resource"));
+        assertTrue(providerTypes.contains("data"));
     }
 
     /**

@@ -13,6 +13,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -21,22 +22,28 @@ import java.util.stream.Collectors;
 /**
  * 模板领域对象。
  *
- * <p>提供两个主要能力：
- * <ul>
- *   <li>解析：在构造对象时，自动处理 zip 或单文件，提取局部变量并求值 Terraform 动作。</li>
- *   <li>配额聚合：在调用 extractQuotas() 时，基于预制表映射和配额规则生成入库对象。</li>
- * </ul>
+ * <p>当前实现不再把 zip 内所有目录都直接当成已部署资源，而是从 root module 出发，
+ * 根据 `module` 调用关系实例化子模块，并在实例级别解析 resource/data。
  */
 @Getter
 @Log4j2
 public class TerraformTemplate {
 
-    private static final String ECS_RESOURCE_TYPE = "ecs";
-    private static final String EVS_RESOURCE_TYPE = "evs";
+    private static final String ECS_RESOURCE_TYPE = "ECS";
+    private static final String EVS_RESOURCE_TYPE = "EVS";
+    private static final String ECS_RESOURCE_TYPE_KEY = QuotaCheckRule.normalizeResourceType(ECS_RESOURCE_TYPE);
+    private static final String EVS_RESOURCE_TYPE_KEY = QuotaCheckRule.normalizeResourceType(EVS_RESOURCE_TYPE);
+    private static final int DEFAULT_COUNT = 1;
+    private static final int DEFAULT_SYSTEM_DISK_GIB = 40;
+    private static final int DEFAULT_DATA_DISK_GIB = 40;
+    private static final int DEFAULT_EVS_VOLUME_GIB = 40;
 
     private final String fileId;
-    
-    // Key 格式为 sourceName:providerType:providerName:blockName，避免 zip 中不同目录下的同名 block 互相覆盖
+
+    /**
+     * Key 格式为 `moduleInstancePath:sourceName:providerType:providerName:blockName`，
+     * 用于区分同一子模块被多次实例化时的资源实例。
+     */
     private final Map<String, TerraformAction> actions = new LinkedHashMap<>();
 
     public TerraformTemplate(
@@ -54,10 +61,6 @@ public class TerraformTemplate {
             throw new IllegalArgumentException("Unsupported template source: " + fileName);
         }
     }
-
-    // ==========================================
-    // 1. 解析模版数据 (Parse 逻辑)
-    // ==========================================
 
     private String buildActionKey(TerraformAction action, String sourceName) {
         if (action == null || action.getProviderName() == null || action.getBlockName() == null) {
@@ -90,17 +93,30 @@ public class TerraformTemplate {
                 }
 
                 byte[] content = zipInputStream.readAllBytes();
-                TerraformFileParser parser = parserFor(entryName, parsers);
-                TerraformFileParser.ParseResult parseResult = parser.parse(new ByteArrayInputStream(content), entryName);
+                TerraformFileParser.ParseResult parseResult;
+                try {
+                    TerraformFileParser parser = parserFor(entryName, parsers);
+                    parseResult = parser.parse(new ByteArrayInputStream(content), entryName);
+                } catch (IOException | RuntimeException exception) {
+                    log.error("Skip zip entry because parser could not parse it. file={}, reason={}",
+                        entryName, exception.getMessage(), exception);
+                    continue;
+                }
 
                 moduleAggregations.computeIfAbsent(parentDirectory(entryName), ignored -> new ModuleAggregation())
                     .merge(parseResult, entryName);
             }
         }
 
-        moduleAggregations.forEach((ignored, moduleAggregation) ->
-            moduleAggregation.resolveActions().forEach(actionWithSource ->
-                addAction(actionWithSource.action, actionWithSource.sourceName))
+        String rootModuleDirectory = resolveRootModuleDirectory(moduleAggregations);
+        ModuleAggregation rootAggregation = moduleAggregations.get(rootModuleDirectory);
+        instantiateModule(
+            rootModuleDirectory,
+            moduleAggregations,
+            Map.of(),
+            "root",
+            new LinkedHashSet<>(),
+            rootAggregation == null ? Set.of() : rootAggregation.runtimeVariableNames()
         );
     }
 
@@ -110,8 +126,84 @@ public class TerraformTemplate {
         ModuleAggregation moduleAggregation = new ModuleAggregation();
         moduleAggregation.merge(parseResult, fileName);
 
-        moduleAggregation.resolveActions().forEach(actionWithSource ->
-            addAction(actionWithSource.action, actionWithSource.sourceName));
+        ResolvedModule resolvedModule = moduleAggregation.resolve(Map.of(), "root", moduleAggregation.runtimeVariableNames());
+        resolvedModule.actions().forEach(actionWithSource ->
+            addAction(actionWithSource.action, "root:" + actionWithSource.sourceName));
+    }
+
+    private void instantiateModule(
+        String moduleDirectory,
+        Map<String, ModuleAggregation> moduleAggregations,
+        Map<String, Object> inputValues,
+        String moduleInstancePath,
+        LinkedHashSet<String> activeModuleStack,
+        Set<String> runtimeVariableNames
+    ) {
+        String normalizedDirectory = moduleDirectory == null ? "" : moduleDirectory;
+        ModuleAggregation aggregation = moduleAggregations.get(normalizedDirectory);
+        if (aggregation == null) {
+            log.info("Skip module instantiation because module directory was not found. moduleDirectory={}, instance={}",
+                normalizedDirectory, moduleInstancePath);
+            return;
+        }
+
+        if (!activeModuleStack.add(normalizedDirectory + "@" + moduleInstancePath)) {
+            log.info("Detected module recursion. moduleDirectory={}, instance={}", normalizedDirectory, moduleInstancePath);
+            return;
+        }
+
+        try {
+            ResolvedModule resolvedModule = aggregation.resolve(inputValues, moduleInstancePath, runtimeVariableNames);
+            resolvedModule.actions().forEach(actionWithSource ->
+                addAction(actionWithSource.action, moduleInstancePath + ":" + actionWithSource.sourceName));
+
+            for (ResolvedModuleCall moduleCall : resolvedModule.moduleCalls()) {
+                if (moduleCall.source() == null || moduleCall.source().isBlank()) {
+                    continue;
+                }
+                if (!isLocalModuleSource(moduleCall.source())) {
+                    continue;
+                }
+                String childModuleDirectory = resolveModuleSource(normalizedDirectory, moduleCall.source());
+                instantiateModule(
+                    childModuleDirectory,
+                    moduleAggregations,
+                    moduleCall.inputValues(),
+                    moduleInstancePath + ".module." + moduleCall.moduleName(),
+                    activeModuleStack,
+                    moduleCall.runtimeVariableInputs()
+                );
+            }
+        } finally {
+            activeModuleStack.remove(normalizedDirectory + "@" + moduleInstancePath);
+        }
+    }
+
+    private String resolveRootModuleDirectory(Map<String, ModuleAggregation> moduleAggregations) {
+        if (moduleAggregations.containsKey("")) {
+            return "";
+        }
+        return moduleAggregations.keySet().stream()
+            .sorted((left, right) -> Integer.compare(left.length(), right.length()))
+            .findFirst()
+            .orElse("");
+    }
+
+    private boolean isLocalModuleSource(String source) {
+        String normalized = normalizeExpression(source);
+        return normalized != null && (normalized.startsWith("./") || normalized.startsWith("../"));
+    }
+
+    private String resolveModuleSource(String currentModuleDirectory, String source) {
+        String normalizedCurrentDirectory = currentModuleDirectory == null ? "" : currentModuleDirectory;
+        String normalizedSource = normalizeExpression(source);
+        if (normalizedSource == null) {
+            return normalizedCurrentDirectory;
+        }
+        if (normalizedCurrentDirectory.isBlank()) {
+            return normalizeArchivePath(normalizedSource);
+        }
+        return normalizeArchivePath(normalizedCurrentDirectory + "/" + normalizedSource);
     }
 
     private static TerraformFileParser parserFor(String fileName, List<TerraformFileParser> parsers) {
@@ -158,41 +250,29 @@ public class TerraformTemplate {
         return String.join("/", segments);
     }
 
-    // ==========================================
-    // 2. 生成配额 (Quota Generation 逻辑)
-    // ==========================================
-
     public TemplateAnalysisResult extractQuotas(
         QuotaCheckRule quotaRules,
-        Map<String, List<ProviderAction>> providerActionsByProviderName
+        Map<ProviderUsageKey, List<ProviderAction>> providerActionsByProviderUsage
     ) {
-        Map<String, List<ProviderAction>> providerActionIndex = providerActionsByProviderName == null
+        Map<ProviderUsageKey, List<ProviderAction>> providerActionIndex = providerActionsByProviderUsage == null
             ? Map.of()
-            : providerActionsByProviderName;
-        Map<String, ProviderType> usedProviderTypes = collectUsedProviderTypes();
+            : providerActionsByProviderUsage;
+        Set<ProviderUsageKey> usedProviderUsages = collectUsedProviderUsages();
 
         List<TemplateProvider> templateProvidersList = new ArrayList<>();
-        for (Map.Entry<String, ProviderType> usedProvider : usedProviderTypes.entrySet()) {
-            String providerName = usedProvider.getKey();
-            List<ProviderAction> providerRules = providerActionIndex.get(providerName);
+        for (ProviderUsageKey usedProviderUsage : usedProviderUsages) {
+            List<ProviderAction> providerRules = providerActionIndex.get(usedProviderUsage);
             if (providerRules == null || providerRules.isEmpty()) {
-                log.warn("Provider was used in the template but was not found in the preset table. providerName={}",
-                    providerName);
-                continue;
-            }
-
-            ProviderType resolvedProviderType = resolveProviderType(
-                usedProvider.getValue(),
-                providerRules
-            );
-            if (resolvedProviderType == null) {
+                log.info("Provider usage was used in the template but was not found in the preset table. providerName={}, providerType={}",
+                    usedProviderUsage.getProviderName(),
+                    usedProviderUsage.getProviderType() == null ? null : usedProviderUsage.getProviderType().getDbValue());
                 continue;
             }
 
             templateProvidersList.add(new TemplateProvider()
                 .setTemplateId(fileId)
-                .setProviderName(providerName)
-                .setProviderType(resolvedProviderType.getDbValue()));
+                .setProviderName(usedProviderUsage.getProviderName())
+                .setProviderType(usedProviderUsage.getProviderType().getDbValue()));
         }
 
         Map<QuotaResourceKey, Integer> quotaRequirements = new LinkedHashMap<>();
@@ -203,7 +283,7 @@ public class TerraformTemplate {
                 if (rule == null) {
                     continue;
                 }
-                applyQuotaRule(rule, resourceActionsByResourceType, quotaRequirements);
+                applyQuotaRule(rule, resourceActionsByResourceType, providerActionIndex, quotaRequirements);
             }
         }
 
@@ -221,67 +301,24 @@ public class TerraformTemplate {
             .setQuotaResources(new ArrayList<>(quotaResourcesList));
     }
 
-    private Map<String, ProviderType> collectUsedProviderTypes() {
-        Map<String, ProviderType> usedProviderTypes = new LinkedHashMap<>();
+    private Set<ProviderUsageKey> collectUsedProviderUsages() {
+        Set<ProviderUsageKey> usedProviderUsages = new LinkedHashSet<>();
         for (TerraformAction action : actions.values()) {
-            if (action == null || action.getProviderName() == null || action.getProviderName().isBlank()) {
+            if (action == null
+                || action.getProviderName() == null
+                || action.getProviderName().isBlank()
+                || action.getProviderType() == null) {
                 continue;
             }
-            usedProviderTypes.merge(
-                action.getProviderName(),
-                action.getProviderType(),
-                this::mergeProviderTypes
-            );
+            usedProviderUsages.add(new ProviderUsageKey(action.getProviderName(), action.getProviderType()));
         }
-        return usedProviderTypes;
-    }
-
-    private ProviderType mergeProviderTypes(
-        ProviderType current,
-        ProviderType next
-    ) {
-        if (current == ProviderType.RESOURCE || next == ProviderType.RESOURCE) {
-            return ProviderType.RESOURCE;
-        }
-        return current != null ? current : next;
-    }
-
-    private ProviderType resolveProviderType(
-        ProviderType usedProviderType,
-        List<ProviderAction> providerRules
-    ) {
-        if (providerRules == null || providerRules.isEmpty()) {
-            return null;
-        }
-
-        ProviderType expectedType = usedProviderType == ProviderType.DATA
-            ? ProviderType.DATA
-            : ProviderType.RESOURCE;
-
-        boolean hasExpectedType = providerRules.stream()
-            .map(ProviderAction::getProviderType)
-            .anyMatch(expectedType::equals);
-        if (hasExpectedType) {
-            return expectedType;
-        }
-
-        boolean hasResource = providerRules.stream()
-            .map(ProviderAction::getProviderType)
-            .anyMatch(ProviderType.RESOURCE::equals);
-        if (hasResource) {
-            return ProviderType.RESOURCE;
-        }
-
-        boolean hasData = providerRules.stream()
-            .map(ProviderAction::getProviderType)
-            .anyMatch(ProviderType.DATA::equals);
-        return hasData ? ProviderType.DATA : null;
+        return usedProviderUsages;
     }
 
     private Map<String, List<TerraformAction>> indexResourceActionsByResourceType(
-        Map<String, List<ProviderAction>> providerActionIndex
+        Map<ProviderUsageKey, List<ProviderAction>> providerActionIndex
     ) {
-        Map<String, LinkedHashSet<TerraformAction>> indexed = new LinkedHashMap<>();
+        Map<String, List<TerraformAction>> indexed = new LinkedHashMap<>();
         for (TerraformAction action : actions.values()) {
             if (action == null || action.getProviderType() != ProviderType.RESOURCE) {
                 continue;
@@ -290,31 +327,31 @@ public class TerraformTemplate {
                 continue;
             }
 
-            List<ProviderAction> providerActions = providerActionIndex.get(action.getProviderName());
+            ProviderUsageKey usageKey = new ProviderUsageKey(action.getProviderName(), action.getProviderType());
+            List<ProviderAction> providerActions = providerActionIndex.get(usageKey);
             if (providerActions == null || providerActions.isEmpty()) {
                 continue;
             }
 
             Set<String> mappedResourceTypes = providerActions.stream()
                 .filter(providerAction -> providerAction.getProviderType() == ProviderType.RESOURCE)
+                .filter(ProviderAction::isPrimaryQuotaSubject)
                 .map(ProviderAction::getResourceType)
                 .map(QuotaCheckRule::normalizeResourceType)
                 .filter(resourceType -> resourceType != null && !resourceType.isBlank())
                 .collect(Collectors.toCollection(LinkedHashSet::new));
 
             for (String mappedResourceType : mappedResourceTypes) {
-                indexed.computeIfAbsent(mappedResourceType, ignored -> new LinkedHashSet<>()).add(action);
+                indexed.computeIfAbsent(mappedResourceType, ignored -> new ArrayList<>()).add(action);
             }
         }
-
-        Map<String, List<TerraformAction>> resourceActionsByResourceType = new LinkedHashMap<>();
-        indexed.forEach((resourceType, actionSet) -> resourceActionsByResourceType.put(resourceType, new ArrayList<>(actionSet)));
-        return resourceActionsByResourceType;
+        return indexed;
     }
 
     private void applyQuotaRule(
         QuotaCheckRule.CloudServiceRule rule,
         Map<String, List<TerraformAction>> resourceActionsByResourceType,
+        Map<ProviderUsageKey, List<ProviderAction>> providerActionIndex,
         Map<QuotaResourceKey, Integer> quotaRequirements
     ) {
         String normalizedResourceType = QuotaCheckRule.normalizeResourceType(rule.getResourceType());
@@ -322,45 +359,55 @@ public class TerraformTemplate {
             return;
         }
 
-        if (ECS_RESOURCE_TYPE.equals(normalizedResourceType)) {
-            for (TerraformAction action : resourceActionsByResourceType.getOrDefault(ECS_RESOURCE_TYPE, List.of())) {
+        if (ECS_RESOURCE_TYPE_KEY.equals(normalizedResourceType)) {
+            for (TerraformAction action : resourceActionsByResourceType.getOrDefault(ECS_RESOURCE_TYPE_KEY, List.of())) {
                 addEcsQuotas(action, rule, quotaRequirements);
             }
             return;
         }
 
-        if (EVS_RESOURCE_TYPE.equals(normalizedResourceType)) {
-            for (TerraformAction action : resourceActionsByResourceType.getOrDefault(EVS_RESOURCE_TYPE, List.of())) {
+        if (EVS_RESOURCE_TYPE_KEY.equals(normalizedResourceType)) {
+            for (TerraformAction action : resourceActionsByResourceType.getOrDefault(EVS_RESOURCE_TYPE_KEY, List.of())) {
                 addEvsVolumeQuotas(action, rule, quotaRequirements);
             }
-            for (TerraformAction action : resourceActionsByResourceType.getOrDefault(ECS_RESOURCE_TYPE, List.of())) {
-                addEvsSystemDiskQuotasFromEcs(action, rule, quotaRequirements);
+            for (TerraformAction action : resourceActionsByResourceType.getOrDefault(ECS_RESOURCE_TYPE_KEY, List.of())) {
+                addEvsQuotasFromEcs(action, rule, quotaRequirements);
             }
             return;
         }
 
         for (TerraformAction action : resourceActionsByResourceType.getOrDefault(normalizedResourceType, List.of())) {
-            addGenericQuotas(action, rule, quotaRequirements);
+            addGenericQuotas(action, rule, providerActionIndex, quotaRequirements);
         }
     }
 
     private void addGenericQuotas(
         TerraformAction action,
         QuotaCheckRule.CloudServiceRule rule,
+        Map<ProviderUsageKey, List<ProviderAction>> providerActionIndex,
         Map<QuotaResourceKey, Integer> quotaRequirements
     ) {
-        List<String> matchedQuotaTypes = selectGenericQuotaTypes(action, rule);
+        List<String> matchedQuotaTypes = selectGenericQuotaTypes(action, rule, providerActionIndex);
         for (String quotaType : matchedQuotaTypes) {
             mergeQuotaRequirement(quotaRequirements, rule.getResourceType(), quotaType, action.getRequestedAmount());
         }
     }
 
-    private List<String> selectGenericQuotaTypes(TerraformAction action, QuotaCheckRule.CloudServiceRule rule) {
+    private List<String> selectGenericQuotaTypes(
+        TerraformAction action,
+        QuotaCheckRule.CloudServiceRule rule,
+        Map<ProviderUsageKey, List<ProviderAction>> providerActionIndex
+    ) {
         if (rule.getQuotaType() == null || rule.getQuotaType().isEmpty()) {
             return List.of();
         }
         if (rule.getQuotaType().size() == 1) {
             return rule.getQuotaType();
+        }
+
+        List<String> hintedQuotaTypes = selectHintedQuotaTypes(action, rule, providerActionIndex);
+        if (!hintedQuotaTypes.isEmpty()) {
+            return hintedQuotaTypes;
         }
 
         String normalizedProviderName = normalizeKey(action.getProviderName());
@@ -372,9 +419,55 @@ public class TerraformTemplate {
             return matched;
         }
 
-        log.warn("Could not determine quota type from provider mapping. providerName={}, resourceType={}, configuredQuotaTypes={}",
-            action.getProviderName(), rule.getResourceType(), rule.getQuotaType());
         return List.of();
+    }
+
+    private List<String> selectHintedQuotaTypes(
+        TerraformAction action,
+        QuotaCheckRule.CloudServiceRule rule,
+        Map<ProviderUsageKey, List<ProviderAction>> providerActionIndex
+    ) {
+        if (action == null
+            || action.getProviderName() == null
+            || action.getProviderName().isBlank()
+            || action.getProviderType() == null
+            || providerActionIndex == null
+            || providerActionIndex.isEmpty()) {
+            return List.of();
+        }
+
+        List<ProviderAction> providerActions = providerActionIndex.get(new ProviderUsageKey(action.getProviderName(), action.getProviderType()));
+        if (providerActions == null || providerActions.isEmpty()) {
+            return List.of();
+        }
+
+        Map<String, String> normalizedRuleQuotaTypes = rule.getQuotaType().stream()
+            .filter(Objects::nonNull)
+            .map(String::trim)
+            .filter(value -> !value.isEmpty())
+            .collect(Collectors.toMap(
+                this::normalizeKey,
+                quotaType -> quotaType,
+                (left, right) -> left,
+                LinkedHashMap::new
+            ));
+        if (normalizedRuleQuotaTypes.isEmpty()) {
+            return List.of();
+        }
+
+        List<String> hinted = providerActions.stream()
+            .map(ProviderAction::getQuotaTypeHint)
+            .filter(Objects::nonNull)
+            .map(String::trim)
+            .filter(value -> !value.isEmpty())
+            .map(hint -> normalizedRuleQuotaTypes.get(normalizeKey(hint)))
+            .filter(Objects::nonNull)
+            .distinct()
+            .toList();
+        if (hinted.isEmpty()) {
+            return List.of();
+        }
+        return hinted;
     }
 
     private boolean quotaTypeMatchesProvider(String normalizedProviderName, String quotaType) {
@@ -407,16 +500,11 @@ public class TerraformTemplate {
         QuotaCheckRule.CloudServiceRule rule,
         Map<QuotaResourceKey, Integer> quotaRequirements
     ) {
-        FlavorSpec flavorSpec = parseFlavorSpec(action.getFlavorId());
+        FlavorSpec flavorSpec = resolveEcsFlavorSpec(action);
 
         for (String quotaType : rule.getQuotaType()) {
             String normalizedQuotaType = normalizeKey(quotaType);
             if (normalizedQuotaType.contains("cpu")) {
-                if (flavorSpec == null) {
-                    log.debug("Skip ECS cpu quota because flavorId could not be resolved. providerName={}",
-                        action.getProviderName());
-                    continue;
-                }
                 mergeQuotaRequirement(
                     quotaRequirements,
                     rule.getResourceType(),
@@ -426,11 +514,6 @@ public class TerraformTemplate {
                 continue;
             }
             if (normalizedQuotaType.contains("ram") || normalizedQuotaType.contains("memory")) {
-                if (flavorSpec == null) {
-                    log.debug("Skip ECS ram quota because flavorId could not be resolved. providerName={}",
-                        action.getProviderName());
-                    continue;
-                }
                 mergeQuotaRequirement(
                     quotaRequirements,
                     rule.getResourceType(),
@@ -443,32 +526,63 @@ public class TerraformTemplate {
         }
     }
 
-    private void addEvsSystemDiskQuotasFromEcs(
+    private FlavorSpec resolveEcsFlavorSpec(TerraformAction action) {
+        if (action == null) {
+            return new FlavorSpec(1, 1);
+        }
+        if (action.getExplicitCpuCount() != null
+            && action.getExplicitCpuCount() > 0
+            && action.getExplicitMemoryGiB() != null
+            && action.getExplicitMemoryGiB() > 0) {
+            return new FlavorSpec(action.getExplicitCpuCount(), action.getExplicitMemoryGiB());
+        }
+
+        FlavorSpec parsedFlavorSpec = parseFlavorSpec(action.getFlavorId());
+        if (parsedFlavorSpec != null) {
+            return parsedFlavorSpec;
+        }
+        return new FlavorSpec(1, 1);
+    }
+
+    private void addEvsQuotasFromEcs(
         TerraformAction action,
         QuotaCheckRule.CloudServiceRule evsRule,
         Map<QuotaResourceKey, Integer> quotaRequirements
     ) {
-        if (evsRule == null) {
+        if (evsRule == null || action == null) {
             return;
         }
+
+        int systemDiskGiB = action.getSystemDiskSize() == null || action.getSystemDiskSize() <= 0
+            ? DEFAULT_SYSTEM_DISK_GIB
+            : action.getSystemDiskSize();
+        List<Integer> dataDiskSizes = action.getDataDiskSizes() == null ? List.of() : action.getDataDiskSizes();
+        int dataDiskCount = dataDiskSizes.size();
+        int dataDiskTotalGiB = dataDiskSizes.stream()
+            .filter(Objects::nonNull)
+            .mapToInt(size -> size > 0 ? size : DEFAULT_DATA_DISK_GIB)
+            .sum();
+
+        int volumeCountPerInstance = 1 + dataDiskCount;
+        int totalDiskGiBPerInstance = systemDiskGiB + dataDiskTotalGiB;
 
         for (String quotaType : evsRule.getQuotaType()) {
             String normalizedQuotaType = normalizeKey(quotaType);
             if (normalizedQuotaType.contains("gigabyte") || normalizedQuotaType.equals("gb")) {
-                if (action.getSystemDiskSize() == null || action.getSystemDiskSize() <= 0) {
-                    log.debug("Skip EVS gigabytes quota derived from ECS because systemDiskSize could not be resolved. providerName={}",
-                        action.getProviderName());
-                    continue;
-                }
                 mergeQuotaRequirement(
                     quotaRequirements,
                     evsRule.getResourceType(),
                     quotaType,
-                    action.getRequestedAmount() * action.getSystemDiskSize()
+                    action.getRequestedAmount() * totalDiskGiBPerInstance
                 );
                 continue;
             }
-            mergeQuotaRequirement(quotaRequirements, evsRule.getResourceType(), quotaType, action.getRequestedAmount());
+            mergeQuotaRequirement(
+                quotaRequirements,
+                evsRule.getResourceType(),
+                quotaType,
+                action.getRequestedAmount() * volumeCountPerInstance
+            );
         }
     }
 
@@ -477,19 +591,17 @@ public class TerraformTemplate {
         QuotaCheckRule.CloudServiceRule rule,
         Map<QuotaResourceKey, Integer> quotaRequirements
     ) {
+        int volumeSize = action.getVolumeSize() == null || action.getVolumeSize() <= 0
+            ? DEFAULT_EVS_VOLUME_GIB
+            : action.getVolumeSize();
         for (String quotaType : rule.getQuotaType()) {
             String normalizedQuotaType = normalizeKey(quotaType);
             if (normalizedQuotaType.contains("gigabyte") || normalizedQuotaType.equals("gb")) {
-                if (action.getVolumeSize() == null || action.getVolumeSize() <= 0) {
-                    log.debug("Skip EVS gigabytes quota because volumeSize could not be resolved. providerName={}",
-                        action.getProviderName());
-                    continue;
-                }
                 mergeQuotaRequirement(
                     quotaRequirements,
                     rule.getResourceType(),
                     quotaType,
-                    action.getRequestedAmount() * action.getVolumeSize()
+                    action.getRequestedAmount() * volumeSize
                 );
                 continue;
             }
@@ -502,7 +614,18 @@ public class TerraformTemplate {
             return null;
         }
 
-        String[] segments = flavorId.trim().toLowerCase(Locale.ROOT).split("\\.");
+        String normalizedFlavorId = flavorId.trim().toLowerCase(Locale.ROOT);
+        java.util.regex.Matcher explicitCpuMemory = java.util.regex.Pattern
+            .compile(".*\\.(\\d+)u\\.(\\d+)g$")
+            .matcher(normalizedFlavorId);
+        if (explicitCpuMemory.matches()) {
+            return new FlavorSpec(
+                Integer.parseInt(explicitCpuMemory.group(1)),
+                Integer.parseInt(explicitCpuMemory.group(2))
+            );
+        }
+
+        String[] segments = normalizedFlavorId.split("\\.");
         if (segments.length < 2) {
             return null;
         }
@@ -604,13 +727,11 @@ public class TerraformTemplate {
         }
     }
 
-    // ==========================================
-    // 3. 内部解析辅助类 (原位于 Service 中)
-    // ==========================================
-
-    private static class ModuleAggregation {
-        private final Map<String, String> localValues = new LinkedHashMap<>();
+    private static final class ModuleAggregation {
+        private final Map<String, Object> localValues = new LinkedHashMap<>();
+        private final Map<String, Object> variableDefaults = new LinkedHashMap<>();
         private final List<ActionWithSource> gatheredActions = new ArrayList<>();
+        private final List<ModuleCallWithSource> gatheredModuleCalls = new ArrayList<>();
 
         private void merge(TerraformFileParser.ParseResult parseResult, String sourceName) {
             if (parseResult == null) {
@@ -619,57 +740,149 @@ public class TerraformTemplate {
             if (parseResult.getLocalValues() != null) {
                 parseResult.getLocalValues().forEach(localValues::put);
             }
+            if (parseResult.getVariableDefaults() != null) {
+                parseResult.getVariableDefaults().forEach(variableDefaults::put);
+            }
             if (parseResult.getActions() != null) {
                 parseResult.getActions().forEach(action -> gatheredActions.add(new ActionWithSource(action, sourceName)));
             }
+            if (parseResult.getModuleCalls() != null) {
+                parseResult.getModuleCalls().forEach(moduleCall -> gatheredModuleCalls.add(new ModuleCallWithSource(moduleCall, sourceName)));
+            }
         }
 
-        private List<ActionWithSource> resolveActions() {
-            List<ActionWithSource> resolved = new ArrayList<>();
+        private Set<String> runtimeVariableNames() {
+            return new LinkedHashSet<>(variableDefaults.keySet());
+        }
+
+        private ResolvedModule resolve(
+            Map<String, Object> inputValues,
+            String moduleInstancePath,
+            Set<String> runtimeVariableNames
+        ) {
+            Map<String, Object> effectiveVariables = new LinkedHashMap<>(variableDefaults);
+            if (inputValues != null) {
+                inputValues.forEach(effectiveVariables::put);
+            }
+            Set<String> effectiveRuntimeVariables = runtimeVariableNames == null
+                ? Set.of()
+                : new LinkedHashSet<>(runtimeVariableNames);
+
+            List<ActionWithSource> resolvedActions = new ArrayList<>();
             for (ActionWithSource actionWithSource : gatheredActions) {
-                TerraformAction action = actionWithSource.action;
-                if (action == null) {
+                TerraformAction originalAction = actionWithSource.action;
+                if (originalAction == null) {
                     continue;
                 }
+                TerraformAction action = copyAction(originalAction);
 
                 if (action.getProviderType() == ProviderType.DATA) {
                     action.setRequestedAmount(1);
                     action.setRequestedAmountExpression(null);
-                    resolved.add(actionWithSource);
+                    resolvedActions.add(new ActionWithSource(action, actionWithSource.sourceName));
                     continue;
                 }
 
                 int requestedAmount = resolveRequestedAmount(
                     action.getRequestedAmountExpression(),
                     localValues,
-                    actionWithSource.sourceName
+                    effectiveVariables,
+                    actionWithSource.sourceName,
+                    effectiveRuntimeVariables
                 );
                 if (requestedAmount <= 0) {
                     continue;
                 }
                 action.setRequestedAmount(requestedAmount);
+                action.setExplicitCpuCount(resolveIntegerExpression(
+                    effectiveVariables.get("instance_flavor_cpu"),
+                    localValues,
+                    effectiveVariables,
+                    actionWithSource.sourceName,
+                    "instance_flavor_cpu"
+                ));
+                action.setExplicitMemoryGiB(resolveIntegerExpression(
+                    effectiveVariables.get("instance_flavor_memory"),
+                    localValues,
+                    effectiveVariables,
+                    actionWithSource.sourceName,
+                    "instance_flavor_memory"
+                ));
                 action.setFlavorId(resolveStringExpression(
                     action.getFlavorIdExpression(),
                     localValues,
+                    effectiveVariables,
                     actionWithSource.sourceName,
-                    "flavor_id",
-                    new LinkedHashSet<>()
+                    "flavor_id"
                 ));
                 action.setSystemDiskSize(resolveIntegerExpression(
                     action.getSystemDiskSizeExpression(),
                     localValues,
+                    effectiveVariables,
                     actionWithSource.sourceName,
                     "system_disk_size"
                 ));
                 action.setVolumeSize(resolveIntegerExpression(
                     action.getVolumeSizeExpression(),
                     localValues,
+                    effectiveVariables,
                     actionWithSource.sourceName,
                     "size"
                 ));
-                resolved.add(actionWithSource);
+                action.setDataDiskSizes(resolveDiskSizes(
+                    effectiveVariables.get("data_disks"),
+                    localValues,
+                    effectiveVariables,
+                    actionWithSource.sourceName
+                ));
+                resolvedActions.add(new ActionWithSource(action, actionWithSource.sourceName));
             }
-            return resolved;
+
+            List<ResolvedModuleCall> resolvedModuleCalls = new ArrayList<>();
+            for (ModuleCallWithSource moduleCallWithSource : gatheredModuleCalls) {
+                TerraformModuleCall moduleCall = moduleCallWithSource.moduleCall;
+                if (moduleCall == null || moduleCall.getModuleName() == null) {
+                    continue;
+                }
+                Map<String, Object> resolvedInputs = new LinkedHashMap<>();
+                Set<String> runtimeVariableInputs = new LinkedHashSet<>();
+                if (moduleCall.getInputValues() != null) {
+                    moduleCall.getInputValues().forEach((inputName, rawValue) -> {
+                        resolvedInputs.put(
+                            inputName,
+                            resolveObjectValue(rawValue, localValues, effectiveVariables, moduleInstancePath, inputName)
+                        );
+                        if (dependsOnRuntimeVariable(rawValue, localValues, effectiveRuntimeVariables)) {
+                            runtimeVariableInputs.add(inputName);
+                        }
+                    });
+                }
+                resolvedModuleCalls.add(new ResolvedModuleCall(
+                    moduleCall.getModuleName(),
+                    normalizeExpression(moduleCall.getSource()),
+                    resolvedInputs,
+                    runtimeVariableInputs
+                ));
+            }
+            return new ResolvedModule(resolvedActions, resolvedModuleCalls);
+        }
+
+        private TerraformAction copyAction(TerraformAction action) {
+            return new TerraformAction()
+                .setProviderName(action.getProviderName())
+                .setBlockName(action.getBlockName())
+                .setProviderType(action.getProviderType())
+                .setRequestedAmount(action.getRequestedAmount())
+                .setRequestedAmountExpression(action.getRequestedAmountExpression())
+                .setExplicitCpuCount(action.getExplicitCpuCount())
+                .setExplicitMemoryGiB(action.getExplicitMemoryGiB())
+                .setFlavorId(action.getFlavorId())
+                .setFlavorIdExpression(action.getFlavorIdExpression())
+                .setSystemDiskSize(action.getSystemDiskSize())
+                .setSystemDiskSizeExpression(action.getSystemDiskSizeExpression())
+                .setDataDiskSizes(action.getDataDiskSizes() == null ? new ArrayList<>() : new ArrayList<>(action.getDataDiskSizes()))
+                .setVolumeSize(action.getVolumeSize())
+                .setVolumeSizeExpression(action.getVolumeSizeExpression());
         }
     }
 
@@ -683,68 +896,554 @@ public class TerraformTemplate {
         }
     }
 
-    private static int resolveRequestedAmount(String expression, Map<String, String> localValues, String sourceName) {
-        Integer resolved = resolveIntegerExpression(expression, localValues, sourceName, "count");
-        return resolved == null ? 1 : Math.max(resolved, 0);
+    private static final class ModuleCallWithSource {
+        private final TerraformModuleCall moduleCall;
+        private final String sourceName;
+
+        private ModuleCallWithSource(TerraformModuleCall moduleCall, String sourceName) {
+            this.moduleCall = moduleCall;
+            this.sourceName = sourceName;
+        }
+    }
+
+    private record ResolvedModule(List<ActionWithSource> actions, List<ResolvedModuleCall> moduleCalls) {
+    }
+
+    private record ResolvedModuleCall(
+        String moduleName,
+        String source,
+        Map<String, Object> inputValues,
+        Set<String> runtimeVariableInputs
+    ) {
+    }
+
+    private static int resolveRequestedAmount(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        Set<String> runtimeVariableNames
+    ) {
+        if (dependsOnRuntimeVariable(expression, localValues, runtimeVariableNames)) {
+            return DEFAULT_COUNT;
+        }
+        Integer resolved = resolveIntegerExpression(expression, localValues, variableValues, sourceName, "count");
+        return resolved == null ? DEFAULT_COUNT : Math.max(resolved, 0);
     }
 
     private static Integer resolveIntegerExpression(
-        String expression,
-        Map<String, String> localValues,
+        Object expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
         String sourceName,
         String fieldName
     ) {
-        String resolvedValue = resolveStringExpression(expression, localValues, sourceName, fieldName, new LinkedHashSet<>());
-        if (resolvedValue == null) {
-            return null;
-        }
-        Integer literal = parseLiteralIntegerHelper(resolvedValue);
-        if (literal != null) {
-            return literal;
-        }
-        log.debug("Unsupported integer expression. field={}, expression={}, source={}",
-            fieldName, expression, sourceName);
-        return null;
+        Object resolvedValue = resolveObjectValue(expression, localValues, variableValues, sourceName, fieldName);
+        return coerceInteger(resolvedValue);
     }
 
     private static String resolveStringExpression(
-        String expression,
-        Map<String, String> localValues,
+        Object expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName
+    ) {
+        Object resolvedValue = resolveObjectValue(expression, localValues, variableValues, sourceName, fieldName);
+        if (resolvedValue == null) {
+            return null;
+        }
+        return resolvedValue instanceof String string ? normalizeExpression(string) : String.valueOf(resolvedValue);
+    }
+
+    private static List<Integer> resolveDiskSizes(
+        Object expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName
+    ) {
+        Object resolvedValue = resolveObjectValue(expression, localValues, variableValues, sourceName, "data_disks");
+        if (!(resolvedValue instanceof List<?> diskDefinitions)) {
+            return List.of();
+        }
+
+        List<Integer> diskSizes = new ArrayList<>();
+        for (Object diskDefinition : diskDefinitions) {
+            if (!(diskDefinition instanceof Map<?, ?> diskAttributes)) {
+                continue;
+            }
+            Integer diskSize = coerceInteger(((Map<?, ?>) diskAttributes).get("data_disk_size"));
+            diskSizes.add(diskSize == null || diskSize <= 0 ? DEFAULT_DATA_DISK_GIB : diskSize);
+        }
+        return diskSizes;
+    }
+
+    private static Object resolveObjectValue(
+        Object expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName
+    ) {
+        return resolveObjectValue(expression, localValues, variableValues, sourceName, fieldName, new LinkedHashSet<>(), new LinkedHashSet<>());
+    }
+
+    private static Object resolveObjectValue(
+        Object expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
         String sourceName,
         String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        if (expression == null) {
+            return null;
+        }
+        if (expression instanceof Number || expression instanceof Boolean) {
+            return expression;
+        }
+        if (expression instanceof List<?> list) {
+            List<Object> resolved = new ArrayList<>();
+            list.forEach(item -> resolved.add(resolveObjectValue(item, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables)));
+            return resolved;
+        }
+        if (expression instanceof Map<?, ?> map) {
+            Map<String, Object> resolved = new LinkedHashMap<>();
+            map.forEach((key, value) -> {
+                if (key != null) {
+                    resolved.put(
+                        String.valueOf(key),
+                        resolveObjectValue(value, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables)
+                    );
+                }
+            });
+            return resolved;
+        }
+        if (!(expression instanceof String rawExpression)) {
+            return expression;
+        }
+        return evaluateExpression(rawExpression, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+    }
+
+    private static boolean dependsOnRuntimeVariable(
+        Object expression,
+        Map<String, Object> localValues,
+        Set<String> runtimeVariableNames
+    ) {
+        return dependsOnRuntimeVariable(expression, localValues, runtimeVariableNames, new LinkedHashSet<>());
+    }
+
+    private static boolean dependsOnRuntimeVariable(
+        Object expression,
+        Map<String, Object> localValues,
+        Set<String> runtimeVariableNames,
         LinkedHashSet<String> visitedLocals
+    ) {
+        if (expression == null || runtimeVariableNames == null || runtimeVariableNames.isEmpty()) {
+            return false;
+        }
+        if (expression instanceof Number || expression instanceof Boolean) {
+            return false;
+        }
+        if (expression instanceof List<?> list) {
+            return list.stream().anyMatch(item -> dependsOnRuntimeVariable(item, localValues, runtimeVariableNames, visitedLocals));
+        }
+        if (expression instanceof Map<?, ?> map) {
+            return map.values().stream().anyMatch(value -> dependsOnRuntimeVariable(value, localValues, runtimeVariableNames, visitedLocals));
+        }
+        if (!(expression instanceof String rawExpression)) {
+            return false;
+        }
+
+        String normalizedExpression = normalizeExpression(rawExpression);
+        if (normalizedExpression == null) {
+            return false;
+        }
+        if (isSimpleReference(normalizedExpression, "var.")) {
+            return runtimeVariableNames.contains(normalizedExpression.substring("var.".length()));
+        }
+        if (isSimpleReference(normalizedExpression, "local.")) {
+            String localName = normalizedExpression.substring("local.".length());
+            if (!visitedLocals.add(localName)) {
+                return false;
+            }
+            return dependsOnRuntimeVariable(localValues.get(localName), localValues, runtimeVariableNames, visitedLocals);
+        }
+
+        java.util.regex.Matcher variableMatcher = java.util.regex.Pattern.compile("var\\.([A-Za-z0-9_]+)").matcher(normalizedExpression);
+        while (variableMatcher.find()) {
+            if (runtimeVariableNames.contains(variableMatcher.group(1))) {
+                return true;
+            }
+        }
+
+        java.util.regex.Matcher localMatcher = java.util.regex.Pattern.compile("local\\.([A-Za-z0-9_]+)").matcher(normalizedExpression);
+        while (localMatcher.find()) {
+            String localName = localMatcher.group(1);
+            if (!visitedLocals.add(localName)) {
+                continue;
+            }
+            if (dependsOnRuntimeVariable(localValues.get(localName), localValues, runtimeVariableNames, visitedLocals)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Object evaluateExpression(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
     ) {
         String normalizedExpression = normalizeExpression(expression);
         if (normalizedExpression == null) {
             return null;
         }
 
-        if (normalizedExpression.startsWith("local.")) {
+        String strippedParentheses = stripOuterParentheses(normalizedExpression);
+        if (!Objects.equals(strippedParentheses, normalizedExpression)) {
+            return evaluateExpression(strippedParentheses, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+        }
+
+        if (isSimpleReference(normalizedExpression, "local.")) {
             String localName = normalizedExpression.substring("local.".length());
             if (!visitedLocals.add(localName)) {
-                log.debug("Detected local reference cycle. localName={}, source={}",
-                    localName, sourceName);
                 return null;
             }
+            Object localValue = localValues.get(localName);
+            return resolveObjectValue(localValue, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+        }
+        if (isSimpleReference(normalizedExpression, "var.")) {
+            String variableName = normalizedExpression.substring("var.".length());
+            if (!visitedVariables.add(variableName)) {
+                return null;
+            }
+            Object variableValue = variableValues.get(variableName);
+            return resolveObjectValue(variableValue, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+        }
 
-            String localValue = localValues.get(localName);
-            if (localValue == null) {
-                log.debug("Local value not found while resolving expression. field={}, expression={}, source={}",
-                    fieldName, normalizedExpression, sourceName);
+        if ("null".equals(normalizedExpression)) {
+            return null;
+        }
+        if ("true".equalsIgnoreCase(normalizedExpression)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(normalizedExpression)) {
+            return false;
+        }
+        Integer literalInteger = parseLiteralIntegerHelper(normalizedExpression);
+        if (literalInteger != null) {
+            return literalInteger;
+        }
+
+        ConditionalParts conditionalParts = findTopLevelConditional(normalizedExpression);
+        if (conditionalParts != null) {
+            Boolean conditionValue = coerceBoolean(
+                evaluateExpression(conditionalParts.condition, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables)
+            );
+            if (conditionValue == null) {
                 return null;
             }
-            return resolveStringExpression(localValue, localValues, sourceName, fieldName, visitedLocals);
+            return evaluateExpression(
+                conditionValue ? conditionalParts.whenTrue : conditionalParts.whenFalse,
+                localValues,
+                variableValues,
+                sourceName,
+                fieldName,
+                visitedLocals,
+                visitedVariables
+            );
+        }
+
+        BinaryParts logicalAnd = splitTopLevel(normalizedExpression, "&&");
+        if (logicalAnd != null) {
+            Boolean left = coerceBoolean(evaluateExpression(logicalAnd.left, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
+            Boolean right = coerceBoolean(evaluateExpression(logicalAnd.right, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
+            return left != null && right != null ? left && right : null;
+        }
+        BinaryParts logicalOr = splitTopLevel(normalizedExpression, "||");
+        if (logicalOr != null) {
+            Boolean left = coerceBoolean(evaluateExpression(logicalOr.left, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
+            Boolean right = coerceBoolean(evaluateExpression(logicalOr.right, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
+            return left != null && right != null ? left || right : null;
+        }
+
+        for (String operator : List.of("!=", "==", ">=", "<=", ">", "<")) {
+            BinaryParts comparison = splitTopLevel(normalizedExpression, operator);
+            if (comparison != null) {
+                Object left = evaluateExpression(comparison.left, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+                Object right = evaluateExpression(comparison.right, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+                return compareValues(left, right, operator);
+            }
+        }
+
+        if (normalizedExpression.startsWith("length(") && normalizedExpression.endsWith(")")) {
+            Object value = evaluateExpression(
+                normalizedExpression.substring("length(".length(), normalizedExpression.length() - 1),
+                localValues,
+                variableValues,
+                sourceName,
+                fieldName,
+                visitedLocals,
+                visitedVariables
+            );
+            if (value instanceof String string) {
+                return string.length();
+            }
+            if (value instanceof List<?> list) {
+                return list.size();
+            }
+            if (value instanceof Map<?, ?> map) {
+                return map.size();
+            }
+            return null;
+        }
+
+        if (normalizedExpression.startsWith("contains(") && normalizedExpression.endsWith(")")) {
+            int commaIndex = findTopLevelComma(normalizedExpression, "contains(".length(), normalizedExpression.length() - 1);
+            if (commaIndex < 0) {
+                return null;
+            }
+            Object container = evaluateExpression(
+                normalizedExpression.substring("contains(".length(), commaIndex),
+                localValues,
+                variableValues,
+                sourceName,
+                fieldName,
+                visitedLocals,
+                visitedVariables
+            );
+            Object candidate = evaluateExpression(
+                normalizedExpression.substring(commaIndex + 1, normalizedExpression.length() - 1),
+                localValues,
+                variableValues,
+                sourceName,
+                fieldName,
+                visitedLocals,
+                visitedVariables
+            );
+            if (container instanceof List<?> list) {
+                return list.contains(candidate);
+            }
+            if (container instanceof String string && candidate != null) {
+                return string.contains(String.valueOf(candidate));
+            }
+            return null;
         }
 
         if (looksLikeUnsupportedExpression(normalizedExpression)) {
-            log.debug("Unsupported expression. field={}, expression={}, source={}",
-                fieldName,
-                normalizedExpression,
-                sourceName);
             return null;
         }
 
         return normalizedExpression;
+    }
+
+    private static Boolean compareValues(Object left, Object right, String operator) {
+        if ("==".equals(operator)) {
+            return Objects.equals(left, right);
+        }
+        if ("!=".equals(operator)) {
+            return !Objects.equals(left, right);
+        }
+
+        Integer leftInteger = coerceInteger(left);
+        Integer rightInteger = coerceInteger(right);
+        if (leftInteger == null || rightInteger == null) {
+            return null;
+        }
+        return switch (operator) {
+            case ">" -> leftInteger > rightInteger;
+            case "<" -> leftInteger < rightInteger;
+            case ">=" -> leftInteger >= rightInteger;
+            case "<=" -> leftInteger <= rightInteger;
+            default -> null;
+        };
+    }
+
+    private static Integer coerceInteger(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Integer integer) {
+            return integer;
+        }
+        if (value instanceof Number number) {
+            return (int) Math.round(number.doubleValue());
+        }
+        if (value instanceof String string) {
+            String trimmed = string.trim();
+            Integer literalInteger = parseLiteralIntegerHelper(trimmed);
+            if (literalInteger != null) {
+                return literalInteger;
+            }
+            try {
+                double decimalValue = Double.parseDouble(trimmed);
+                return (int) Math.round(decimalValue);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static Boolean coerceBoolean(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        if (value instanceof String string) {
+            String trimmed = string.trim();
+            if ("true".equalsIgnoreCase(trimmed)) {
+                return true;
+            }
+            if ("false".equalsIgnoreCase(trimmed)) {
+                return false;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isSimpleReference(String expression, String prefix) {
+        if (!expression.startsWith(prefix)) {
+            return false;
+        }
+        return expression.indexOf(' ') < 0
+            && expression.indexOf('(') < 0
+            && expression.indexOf(')') < 0
+            && expression.indexOf('[') < 0
+            && expression.indexOf(']') < 0
+            && expression.indexOf('?') < 0
+            && expression.indexOf(':') < 0
+            && expression.indexOf('=') < 0
+            && expression.indexOf('&') < 0
+            && expression.indexOf('|') < 0
+            && expression.indexOf('>') < 0
+            && expression.indexOf('<') < 0
+            && expression.indexOf(',') < 0;
+    }
+
+    private static String stripOuterParentheses(String expression) {
+        String normalized = expression == null ? null : expression.trim();
+        if (normalized == null || normalized.length() < 2 || normalized.charAt(0) != '(' || normalized.charAt(normalized.length() - 1) != ')') {
+            return normalized;
+        }
+        int depth = 0;
+        for (int index = 0; index < normalized.length(); index++) {
+            char current = normalized.charAt(index);
+            if (current == '(') {
+                depth++;
+            } else if (current == ')') {
+                depth--;
+                if (depth == 0 && index < normalized.length() - 1) {
+                    return normalized;
+                }
+            }
+        }
+        return normalized.substring(1, normalized.length() - 1).trim();
+    }
+
+    private static ConditionalParts findTopLevelConditional(String expression) {
+        int depthRound = 0;
+        int depthSquare = 0;
+        int questionIndex = -1;
+        for (int index = 0; index < expression.length(); index++) {
+            char current = expression.charAt(index);
+            if (current == '(') {
+                depthRound++;
+            } else if (current == ')') {
+                depthRound--;
+            } else if (current == '[') {
+                depthSquare++;
+            } else if (current == ']') {
+                depthSquare--;
+            } else if (current == '?' && depthRound == 0 && depthSquare == 0) {
+                questionIndex = index;
+                break;
+            }
+        }
+        if (questionIndex < 0) {
+            return null;
+        }
+
+        depthRound = 0;
+        depthSquare = 0;
+        for (int index = questionIndex + 1; index < expression.length(); index++) {
+            char current = expression.charAt(index);
+            if (current == '(') {
+                depthRound++;
+            } else if (current == ')') {
+                depthRound--;
+            } else if (current == '[') {
+                depthSquare++;
+            } else if (current == ']') {
+                depthSquare--;
+            } else if (current == ':' && depthRound == 0 && depthSquare == 0) {
+                return new ConditionalParts(
+                    expression.substring(0, questionIndex).trim(),
+                    expression.substring(questionIndex + 1, index).trim(),
+                    expression.substring(index + 1).trim()
+                );
+            }
+        }
+        return null;
+    }
+
+    private static BinaryParts splitTopLevel(String expression, String operator) {
+        int depthRound = 0;
+        int depthSquare = 0;
+        for (int index = 0; index <= expression.length() - operator.length(); index++) {
+            char current = expression.charAt(index);
+            if (current == '(') {
+                depthRound++;
+                continue;
+            }
+            if (current == ')') {
+                depthRound--;
+                continue;
+            }
+            if (current == '[') {
+                depthSquare++;
+                continue;
+            }
+            if (current == ']') {
+                depthSquare--;
+                continue;
+            }
+            if (depthRound == 0 && depthSquare == 0 && expression.startsWith(operator, index)) {
+                return new BinaryParts(
+                    expression.substring(0, index).trim(),
+                    expression.substring(index + operator.length()).trim()
+                );
+            }
+        }
+        return null;
+    }
+
+    private static int findTopLevelComma(String expression, int startInclusive, int endExclusive) {
+        int depthRound = 0;
+        int depthSquare = 0;
+        for (int index = startInclusive; index < endExclusive; index++) {
+            char current = expression.charAt(index);
+            if (current == '(') {
+                depthRound++;
+            } else if (current == ')') {
+                depthRound--;
+            } else if (current == '[') {
+                depthSquare++;
+            } else if (current == ']') {
+                depthSquare--;
+            } else if (current == ',' && depthRound == 0 && depthSquare == 0) {
+                return index;
+            }
+        }
+        return -1;
     }
 
     private static boolean looksLikeUnsupportedExpression(String expression) {
@@ -752,25 +1451,26 @@ public class TerraformTemplate {
         if (normalized == null || normalized.isEmpty()) {
             return false;
         }
-        return normalized.startsWith("var.")
-            || normalized.startsWith("data.")
-            || normalized.contains("?")
-            || normalized.contains("(")
-            || normalized.contains(")")
-            || normalized.contains("[")
-            || normalized.contains("]")
+        return normalized.startsWith("data.")
+            || normalized.startsWith("module.")
             || normalized.contains("count.index")
             || normalized.contains("each.")
             || normalized.contains(" for ")
-            || normalized.contains("lookup(")
-            || normalized.contains("format(")
-            || normalized.contains("length(")
-            || normalized.contains("contains(")
-            || normalized.contains("keys(")
-            || normalized.contains("values(");
+            || normalized.startsWith("lookup(")
+            || normalized.startsWith("format(")
+            || normalized.startsWith("keys(")
+            || normalized.startsWith("values(")
+            || normalized.startsWith("slice(")
+            || normalized.startsWith("setintersection(")
+            || normalized.startsWith("tolist(")
+            || normalized.contains("[")
+            || normalized.contains("]");
     }
 
     private static Integer parseLiteralIntegerHelper(String expression) {
+        if (expression == null || expression.isBlank()) {
+            return null;
+        }
         if (!expression.chars().allMatch(character -> Character.isDigit(character) || character == '-')) {
             return null;
         }
@@ -792,6 +1492,17 @@ public class TerraformTemplate {
         if (normalized.startsWith("${") && normalized.endsWith("}")) {
             normalized = normalized.substring(2, normalized.length() - 1).trim();
         }
+        if (normalized.length() >= 2
+            && normalized.startsWith("\"")
+            && normalized.endsWith("\"")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
         return normalized.isEmpty() ? null : normalized;
+    }
+
+    private record ConditionalParts(String condition, String whenTrue, String whenFalse) {
+    }
+
+    private record BinaryParts(String left, String right) {
     }
 }

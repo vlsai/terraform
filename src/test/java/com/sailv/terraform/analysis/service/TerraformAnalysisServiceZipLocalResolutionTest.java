@@ -22,14 +22,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class TerraformAnalysisServiceZipLocalResolutionTest {
 
     @Test
-    void shouldResolveLocalCountAcrossFilesInSameZipDirectory() throws Exception {
+    void shouldResolveLocalCountAcrossModuleFilesInZip() throws Exception {
         byte[] zipContent = buildZip(
-            "code/modules/ecs/locals.tf", """
+            "main.tf", """
+                module "ecs" {
+                  source = "./modules/ecs"
+                }
+                """,
+            "modules/ecs/locals.tf", """
                 locals {
                   ecs_count = 2
                 }
                 """,
-            "code/modules/ecs/main.tf", """
+            "modules/ecs/main.tf", """
                 resource "huaweicloud_compute_instance" "web" {
                   count = local.ecs_count
                 }
@@ -57,16 +62,20 @@ class TerraformAnalysisServiceZipLocalResolutionTest {
     }
 
     @Test
-    void shouldNotOverwriteSameBlockNameAcrossDifferentZipDirectories() throws Exception {
+    void shouldCountMultipleCallsToSameChildModuleSeparately() throws Exception {
         byte[] zipContent = buildZip(
-            "code/modules/ecs-a/main.tf", """
-                resource "huaweicloud_compute_instance" "web" {
-                  count = 1
+            "main.tf", """
+                module "ecs_a" {
+                  source = "./modules/ecs"
+                }
+
+                module "ecs_b" {
+                  source = "./modules/ecs"
                 }
                 """,
-            "code/modules/ecs-b/main.tf", """
+            "modules/ecs/main.tf", """
                 resource "huaweicloud_compute_instance" "web" {
-                  count = 2
+                  count = 1
                 }
                 """
         );
@@ -85,19 +94,63 @@ class TerraformAnalysisServiceZipLocalResolutionTest {
         }
 
         assertEquals(1, result.getQuotaResources().size());
-        assertEquals(3, result.getQuotaResources().getFirst().getQuotaRequirement());
+        assertEquals(2, result.getQuotaResources().getFirst().getQuotaRequirement());
     }
 
-    private byte[] buildZip(String firstPath, String firstContent, String secondPath, String secondContent) throws Exception {
+    @Test
+    void shouldFallbackToOneWhenChildModuleCountDependsOnRootVariable() throws Exception {
+        byte[] zipContent = buildZip(
+            "variables.tf", """
+                variable "create_instance" {
+                  type = bool
+                  default = false
+                }
+                """,
+            "main.tf", """
+                module "ecs" {
+                  source = "./modules/ecs"
+                  is_instance_create = var.create_instance
+                }
+                """,
+            "modules/ecs/variables.tf", """
+                variable "is_instance_create" {
+                  type = bool
+                  default = false
+                }
+                """,
+            "modules/ecs/main.tf", """
+                resource "huaweicloud_compute_instance" "web" {
+                  count = var.is_instance_create ? 1 : 0
+                }
+                """
+        );
+
+        TerraformAnalysisService service = new TerraformAnalysisServiceImpl(new StubTemplateAnalysisGateway());
+        TemplateAnalysisResult result;
+        try (ByteArrayInputStream inputStream = new ByteArrayInputStream(zipContent)) {
+            result = service.analyze(
+                "template-zip-runtime-var",
+                inputStream,
+                "template.zip",
+                QuotaCheckRule.of(
+                    QuotaCheckRule.CloudServiceRule.of("ECS", "https://quota.internal/ecs", "instance")
+                )
+            );
+        }
+
+        assertEquals(1, result.getQuotaResources().size());
+        assertEquals(1, result.getQuotaResources().getFirst().getQuotaRequirement());
+    }
+
+    private byte[] buildZip(String... entries) throws Exception {
+        assertEquals(0, entries.length % 2);
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         try (ZipOutputStream zipOutputStream = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
-            zipOutputStream.putNextEntry(new ZipEntry(firstPath));
-            zipOutputStream.write(firstContent.getBytes(StandardCharsets.UTF_8));
-            zipOutputStream.closeEntry();
-
-            zipOutputStream.putNextEntry(new ZipEntry(secondPath));
-            zipOutputStream.write(secondContent.getBytes(StandardCharsets.UTF_8));
-            zipOutputStream.closeEntry();
+            for (int index = 0; index < entries.length; index += 2) {
+                zipOutputStream.putNextEntry(new ZipEntry(entries[index]));
+                zipOutputStream.write(entries[index + 1].getBytes(StandardCharsets.UTF_8));
+                zipOutputStream.closeEntry();
+            }
         }
         return outputStream.toByteArray();
     }
