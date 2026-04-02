@@ -75,15 +75,15 @@ public class HclTerraformFileParser implements TerraformFileParser {
         List<TerraformModuleCall> moduleCalls = new ArrayList<>();
         List<TerraformAction> actions = new ArrayList<>();
 
-        collectProviderBlocks(value(root, "provider"), providerBlockNames);
+        collectProviderBlocks(root.get("provider"), providerBlockNames);
         // hcl4j 在不同 Terraform 片段上，locals 根节点既可能表现为 `locals`，
         // 也可能表现为 `local`。这里同时兼容，避免 locals-only 文件在 zip 聚合时丢值。
-        collectLocals(value(root, "locals"), localValues);
-        collectLocals(value(root, "local"), localValues);
-        collectVariables(value(root, "variable"), variableDefaults);
-        collectModuleCalls(value(root, "module"), moduleCalls);
-        collectActions(value(root, "resource"), ProviderType.RESOURCE, fileName, actions);
-        collectActions(value(root, "data"), ProviderType.DATA, fileName, actions);
+        collectLocals(root.get("locals"), localValues);
+        collectLocals(root.get("local"), localValues);
+        collectVariables(root.get("variable"), variableDefaults);
+        collectModuleCalls(root.get("module"), moduleCalls);
+        collectActions(root.get("resource"), ProviderType.RESOURCE, fileName, actions);
+        collectActions(root.get("data"), ProviderType.DATA, fileName, actions);
         supplementMissingTopLevelExpressions(rawContent, actions);
 
         return new ParseResult()
@@ -391,16 +391,16 @@ public class HclTerraformFileParser implements TerraformFileParser {
                 .setProviderType(providerType)
                 .setRequestedAmount(providerType == ProviderType.DATA ? 1 : 0)
                 .setRequestedAmountExpression(providerType == ProviderType.RESOURCE
-                    ? normalizeExpression(value(attributes, "count"))
+                    ? normalizeExpression(attributes.get("count"))
                     : null)
                 .setFlavorIdExpression(providerType == ProviderType.RESOURCE
-                    ? normalizeExpression(value(attributes, "flavor_id"))
+                    ? normalizeExpression(attributes.get("flavor_id"))
                     : null)
                 .setSystemDiskSizeExpression(providerType == ProviderType.RESOURCE
-                    ? normalizeExpression(value(attributes, "system_disk_size"))
+                    ? normalizeExpression(attributes.get("system_disk_size"))
                     : null)
                 .setVolumeSizeExpression(providerType == ProviderType.RESOURCE
-                    ? normalizeExpression(value(attributes, "size"))
+                    ? normalizeExpression(attributes.get("size"))
                     : null);
             actions.add(action);
         }
@@ -412,10 +412,6 @@ public class HclTerraformFileParser implements TerraformFileParser {
             return (Map<String, Object>) map;
         }
         return Map.of();
-    }
-
-    private Object value(Map<String, Object> map, String key) {
-        return map.get(key);
     }
 
     private Object asStructuredValue(Object value) {

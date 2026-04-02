@@ -1110,130 +1110,74 @@ public class TerraformTemplate {
             return evaluateExpression(strippedParentheses, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
         }
 
-        if (isSimpleReference(normalizedExpression, "local.")) {
-            String localName = normalizedExpression.substring("local.".length());
-            if (!visitedLocals.add(localName)) {
-                return null;
-            }
-            Object localValue = localValues.get(localName);
-            return resolveObjectValue(localValue, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
-        }
-        if (isSimpleReference(normalizedExpression, "var.")) {
-            String variableName = normalizedExpression.substring("var.".length());
-            if (!visitedVariables.add(variableName)) {
-                return null;
-            }
-            Object variableValue = variableValues.get(variableName);
-            return resolveObjectValue(variableValue, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+        Object directReferenceValue = evaluateDirectReference(
+            normalizedExpression,
+            localValues,
+            variableValues,
+            sourceName,
+            fieldName,
+            visitedLocals,
+            visitedVariables
+        );
+        if (directReferenceValue != UNRESOLVED_EXPRESSION) {
+            return directReferenceValue;
         }
 
-        if ("null".equals(normalizedExpression)) {
-            return null;
-        }
-        if ("true".equalsIgnoreCase(normalizedExpression)) {
-            return true;
-        }
-        if ("false".equalsIgnoreCase(normalizedExpression)) {
-            return false;
-        }
-        Integer literalInteger = parseLiteralIntegerHelper(normalizedExpression);
-        if (literalInteger != null) {
-            return literalInteger;
+        Object literalValue = evaluateLiteralValue(normalizedExpression);
+        if (literalValue != UNRESOLVED_EXPRESSION) {
+            return literalValue;
         }
 
-        ConditionalParts conditionalParts = findTopLevelConditional(normalizedExpression);
-        if (conditionalParts != null) {
-            Boolean conditionValue = coerceBoolean(
-                evaluateExpression(conditionalParts.condition, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables)
-            );
-            if (conditionValue == null) {
-                return null;
-            }
-            return evaluateExpression(
-                conditionValue ? conditionalParts.whenTrue : conditionalParts.whenFalse,
-                localValues,
-                variableValues,
-                sourceName,
-                fieldName,
-                visitedLocals,
-                visitedVariables
-            );
+        Object conditionalValue = evaluateConditionalExpression(
+            normalizedExpression,
+            localValues,
+            variableValues,
+            sourceName,
+            fieldName,
+            visitedLocals,
+            visitedVariables
+        );
+        if (conditionalValue != UNRESOLVED_EXPRESSION) {
+            return conditionalValue;
         }
 
-        BinaryParts logicalAnd = splitTopLevel(normalizedExpression, "&&");
-        if (logicalAnd != null) {
-            Boolean left = coerceBoolean(evaluateExpression(logicalAnd.left, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
-            Boolean right = coerceBoolean(evaluateExpression(logicalAnd.right, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
-            return left != null && right != null ? left && right : null;
-        }
-        BinaryParts logicalOr = splitTopLevel(normalizedExpression, "||");
-        if (logicalOr != null) {
-            Boolean left = coerceBoolean(evaluateExpression(logicalOr.left, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
-            Boolean right = coerceBoolean(evaluateExpression(logicalOr.right, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
-            return left != null && right != null ? left || right : null;
-        }
-
-        for (String operator : List.of("!=", "==", ">=", "<=", ">", "<")) {
-            BinaryParts comparison = splitTopLevel(normalizedExpression, operator);
-            if (comparison != null) {
-                Object left = evaluateExpression(comparison.left, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
-                Object right = evaluateExpression(comparison.right, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
-                return compareValues(left, right, operator);
-            }
+        Object logicalValue = evaluateLogicalExpression(
+            normalizedExpression,
+            localValues,
+            variableValues,
+            sourceName,
+            fieldName,
+            visitedLocals,
+            visitedVariables
+        );
+        if (logicalValue != UNRESOLVED_EXPRESSION) {
+            return logicalValue;
         }
 
-        if (normalizedExpression.startsWith("length(") && normalizedExpression.endsWith(")")) {
-            Object value = evaluateExpression(
-                normalizedExpression.substring("length(".length(), normalizedExpression.length() - 1),
-                localValues,
-                variableValues,
-                sourceName,
-                fieldName,
-                visitedLocals,
-                visitedVariables
-            );
-            if (value instanceof String string) {
-                return string.length();
-            }
-            if (value instanceof List<?> list) {
-                return list.size();
-            }
-            if (value instanceof Map<?, ?> map) {
-                return map.size();
-            }
-            return null;
+        Object comparisonValue = evaluateComparisonExpression(
+            normalizedExpression,
+            localValues,
+            variableValues,
+            sourceName,
+            fieldName,
+            visitedLocals,
+            visitedVariables
+        );
+        if (comparisonValue != UNRESOLVED_EXPRESSION) {
+            return comparisonValue;
         }
 
-        if (normalizedExpression.startsWith("contains(") && normalizedExpression.endsWith(")")) {
-            int commaIndex = findTopLevelComma(normalizedExpression, "contains(".length(), normalizedExpression.length() - 1);
-            if (commaIndex < 0) {
-                return null;
-            }
-            Object container = evaluateExpression(
-                normalizedExpression.substring("contains(".length(), commaIndex),
-                localValues,
-                variableValues,
-                sourceName,
-                fieldName,
-                visitedLocals,
-                visitedVariables
-            );
-            Object candidate = evaluateExpression(
-                normalizedExpression.substring(commaIndex + 1, normalizedExpression.length() - 1),
-                localValues,
-                variableValues,
-                sourceName,
-                fieldName,
-                visitedLocals,
-                visitedVariables
-            );
-            if (container instanceof List<?> list) {
-                return list.contains(candidate);
-            }
-            if (container instanceof String string && candidate != null) {
-                return string.contains(String.valueOf(candidate));
-            }
-            return null;
+        Object functionValue = evaluateFunctionExpression(
+            normalizedExpression,
+            localValues,
+            variableValues,
+            sourceName,
+            fieldName,
+            visitedLocals,
+            visitedVariables
+        );
+        if (functionValue != UNRESOLVED_EXPRESSION) {
+            return functionValue;
         }
 
         if (looksLikeUnsupportedExpression(normalizedExpression)) {
@@ -1241,6 +1185,263 @@ public class TerraformTemplate {
         }
 
         return normalizedExpression;
+    }
+
+    private static final Object UNRESOLVED_EXPRESSION = new Object();
+
+    private static Object evaluateDirectReference(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        if (isSimpleReference(expression, "local.")) {
+            return evaluateLocalReference(expression, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+        }
+        if (isSimpleReference(expression, "var.")) {
+            return evaluateVariableReference(expression, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+        }
+        return UNRESOLVED_EXPRESSION;
+    }
+
+    private static Object evaluateLocalReference(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        String localName = expression.substring("local.".length());
+        if (!visitedLocals.add(localName)) {
+            return null;
+        }
+        Object localValue = localValues.get(localName);
+        return resolveObjectValue(localValue, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+    }
+
+    private static Object evaluateVariableReference(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        String variableName = expression.substring("var.".length());
+        if (!visitedVariables.add(variableName)) {
+            return null;
+        }
+        Object variableValue = variableValues.get(variableName);
+        return resolveObjectValue(variableValue, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+    }
+
+    private static Object evaluateLiteralValue(String expression) {
+        if ("null".equals(expression)) {
+            return null;
+        }
+        if ("true".equalsIgnoreCase(expression)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(expression)) {
+            return false;
+        }
+        Integer literalInteger = parseLiteralIntegerHelper(expression);
+        return literalInteger == null ? UNRESOLVED_EXPRESSION : literalInteger;
+    }
+
+    private static Object evaluateConditionalExpression(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        ConditionalParts conditionalParts = findTopLevelConditional(expression);
+        if (conditionalParts == null) {
+            return UNRESOLVED_EXPRESSION;
+        }
+        Boolean conditionValue = coerceBoolean(
+            evaluateExpression(conditionalParts.condition, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables)
+        );
+        if (conditionValue == null) {
+            return null;
+        }
+        return evaluateExpression(
+            conditionValue ? conditionalParts.whenTrue : conditionalParts.whenFalse,
+            localValues,
+            variableValues,
+            sourceName,
+            fieldName,
+            visitedLocals,
+            visitedVariables
+        );
+    }
+
+    private static Object evaluateLogicalExpression(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        Object logicalAndValue = evaluateBinaryLogicalExpression(
+            expression, "&&", localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables
+        );
+        if (logicalAndValue != UNRESOLVED_EXPRESSION) {
+            return logicalAndValue;
+        }
+        return evaluateBinaryLogicalExpression(
+            expression, "||", localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables
+        );
+    }
+
+    private static Object evaluateBinaryLogicalExpression(
+        String expression,
+        String operator,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        BinaryParts binaryParts = splitTopLevel(expression, operator);
+        if (binaryParts == null) {
+            return UNRESOLVED_EXPRESSION;
+        }
+        Boolean left = coerceBoolean(evaluateExpression(binaryParts.left, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
+        Boolean right = coerceBoolean(evaluateExpression(binaryParts.right, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables));
+        if (left == null || right == null) {
+            return null;
+        }
+        return "&&".equals(operator) ? left && right : left || right;
+    }
+
+    private static Object evaluateComparisonExpression(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        for (String operator : List.of("!=", "==", ">=", "<=", ">", "<")) {
+            BinaryParts comparison = splitTopLevel(expression, operator);
+            if (comparison == null) {
+                continue;
+            }
+            Object left = evaluateExpression(comparison.left, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+            Object right = evaluateExpression(comparison.right, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables);
+            return compareValues(left, right, operator);
+        }
+        return UNRESOLVED_EXPRESSION;
+    }
+
+    private static Object evaluateFunctionExpression(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        Object lengthValue = evaluateLengthExpression(
+            expression, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables
+        );
+        if (lengthValue != UNRESOLVED_EXPRESSION) {
+            return lengthValue;
+        }
+        return evaluateContainsExpression(
+            expression, localValues, variableValues, sourceName, fieldName, visitedLocals, visitedVariables
+        );
+    }
+
+    private static Object evaluateLengthExpression(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        if (!expression.startsWith("length(") || !expression.endsWith(")")) {
+            return UNRESOLVED_EXPRESSION;
+        }
+        Object value = evaluateExpression(
+            expression.substring("length(".length(), expression.length() - 1),
+            localValues,
+            variableValues,
+            sourceName,
+            fieldName,
+            visitedLocals,
+            visitedVariables
+        );
+        if (value instanceof String string) {
+            return string.length();
+        }
+        if (value instanceof List<?> list) {
+            return list.size();
+        }
+        if (value instanceof Map<?, ?> map) {
+            return map.size();
+        }
+        return null;
+    }
+
+    private static Object evaluateContainsExpression(
+        String expression,
+        Map<String, Object> localValues,
+        Map<String, Object> variableValues,
+        String sourceName,
+        String fieldName,
+        LinkedHashSet<String> visitedLocals,
+        LinkedHashSet<String> visitedVariables
+    ) {
+        if (!expression.startsWith("contains(") || !expression.endsWith(")")) {
+            return UNRESOLVED_EXPRESSION;
+        }
+        int commaIndex = findTopLevelComma(expression, "contains(".length(), expression.length() - 1);
+        if (commaIndex < 0) {
+            return null;
+        }
+        Object container = evaluateExpression(
+            expression.substring("contains(".length(), commaIndex),
+            localValues,
+            variableValues,
+            sourceName,
+            fieldName,
+            visitedLocals,
+            visitedVariables
+        );
+        Object candidate = evaluateExpression(
+            expression.substring(commaIndex + 1, expression.length() - 1),
+            localValues,
+            variableValues,
+            sourceName,
+            fieldName,
+            visitedLocals,
+            visitedVariables
+        );
+        if (container instanceof List<?> list) {
+            return list.contains(candidate);
+        }
+        if (container instanceof String string && candidate != null) {
+            return string.contains(String.valueOf(candidate));
+        }
+        return null;
     }
 
     private static Boolean compareValues(Object left, Object right, String operator) {
