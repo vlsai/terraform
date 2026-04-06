@@ -7,9 +7,10 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * `t_mp_provider_actions` 数据库访问接口。
+ * provider action 预制定义数据库访问接口。
  *
  * <p>内网项目里可以由 MyBatis XML 或注解方式实现。
+ * 当前数据源为 `t_mp_provider_actions`。
  */
 public interface ProviderActionMapper {
 

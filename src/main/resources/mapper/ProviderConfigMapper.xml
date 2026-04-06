@@ -2,31 +2,35 @@
 <!DOCTYPE mapper
         PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderActionMapper">
+<mapper namespace="com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderConfigMapper">
 
-    <resultMap id="ProviderActionPoMap" type="com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo">
+    <resultMap id="ProviderConfigPoMap" type="com.sailv.terraform.analysis.infrastructure.database.po.ProviderConfigPo">
+        <result property="id" column="id"/>
         <result property="providerName" column="provider_name"/>
-        <result property="actionName" column="action_name"/>
-        <result property="resourceType" column="resource_type"/>
         <result property="providerType" column="provider_type"/>
+        <result property="isPrimaryQuotaSubject" column="is_primary_quota_subject"/>
+        <result property="quotaResourceType" column="quota_resource_type"/>
+        <result property="quotaTypeHint" column="quota_type_hint"/>
         <result property="createTime" column="create_time"/>
         <result property="updateTime" column="update_time"/>
     </resultMap>
 
-    <resultMap id="ProviderUsagePoMap" type="com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo">
+    <resultMap id="ProviderUsagePoMap" type="com.sailv.terraform.analysis.infrastructure.database.po.ProviderConfigPo">
         <result property="providerName" column="provider_name"/>
         <result property="providerType" column="provider_type"/>
     </resultMap>
 
-    <select id="selectByProviderUsages" resultMap="ProviderActionPoMap">
+    <select id="selectByProviderUsages" resultMap="ProviderConfigPoMap">
         SELECT
+            id,
             provider_name,
-            action_name,
-            resource_type,
             provider_type,
+            is_primary_quota_subject,
+            quota_resource_type,
+            quota_type_hint,
             create_time,
             update_time
-        FROM t_mp_provider_actions
+        FROM t_mp_provider_config
         <where>
             <foreach collection="collection" item="usage" separator=" OR ">
                 (provider_name = #{usage.providerName}
@@ -39,7 +43,7 @@
         SELECT DISTINCT
             provider_name,
             provider_type
-        FROM t_mp_provider_actions
+        FROM t_mp_provider_config
         <where>
             <foreach collection="collection" item="usage" separator=" OR ">
                 (provider_name = #{usage.providerName}

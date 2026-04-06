@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.infrastructure.gateway;
 
-import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderConfig;
 import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
@@ -8,10 +8,10 @@ import com.sailv.terraform.analysis.domain.model.TemplateProvider;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 import com.sailv.terraform.analysis.gateway.TemplateAnalysisGateway;
 import com.sailv.terraform.analysis.infrastructure.database.convertor.TemplateAnalysisDataConvertor;
-import com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderActionMapper;
+import com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderConfigMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateProviderMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateQuotaResourceMapper;
-import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
+import com.sailv.terraform.analysis.infrastructure.database.po.ProviderConfigPo;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -28,7 +28,7 @@ import java.util.stream.Collectors;
  *
  * <p>同时负责：
  * <ul>
- *     <li>查询 `t_mp_provider_actions`</li>
+ *     <li>查询 `t_mp_provider_config` 预制定义</li>
  *     <li>落库 `t_mp_template_providers` / `t_mp_template_resource`</li>
  * </ul>
  *
@@ -42,25 +42,25 @@ import java.util.stream.Collectors;
 @Component
 public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway {
 
-    private final ProviderActionMapper providerActionMapper;
+    private final ProviderConfigMapper providerConfigMapper;
     private final TemplateProviderMapper templateProviderMapper;
     private final TemplateQuotaResourceMapper templateQuotaResourceMapper;
     private final TemplateAnalysisDataConvertor convertor;
 
     @Autowired
     public DatabaseTemplateAnalysisGateway(
-        ProviderActionMapper providerActionMapper,
+        ProviderConfigMapper providerConfigMapper,
         TemplateProviderMapper templateProviderMapper,
         TemplateQuotaResourceMapper templateQuotaResourceMapper
     ) {
-        this.providerActionMapper = Objects.requireNonNull(providerActionMapper, "providerActionMapper cannot be null");
+        this.providerConfigMapper = Objects.requireNonNull(providerConfigMapper, "providerConfigMapper cannot be null");
         this.templateProviderMapper = Objects.requireNonNull(templateProviderMapper, "templateProviderMapper cannot be null");
         this.templateQuotaResourceMapper = Objects.requireNonNull(templateQuotaResourceMapper, "templateQuotaResourceMapper cannot be null");
         this.convertor = TemplateAnalysisDataConvertor.INSTANCE;
     }
 
     @Override
-    public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
+    public List<ProviderConfig> findByProviderUsages(Collection<TerraformAction> actions) {
         if (actions == null || actions.isEmpty()) {
             return List.of();
         }
@@ -75,8 +75,8 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
             return List.of();
         }
 
-        List<ProviderActionPo> fetched = providerActionMapper.selectByProviderUsages(providerUsages);
-        return convertor.toProviderActions(fetched == null ? List.of() : fetched);
+        List<ProviderConfigPo> fetched = providerConfigMapper.selectByProviderUsages(providerUsages);
+        return convertor.toProviderConfigs(fetched == null ? List.of() : fetched);
     }
 
     @Override
@@ -116,8 +116,8 @@ public class DatabaseTemplateAnalysisGateway implements TemplateAnalysisGateway 
             return List.of();
         }
 
-        List<ProviderActionPo> existingProviderUsageRows = providerActionMapper.selectExistingProviderUsages(requestedProviderUsages);
-        Set<ProviderUsageKey> validProviderUsages = (existingProviderUsageRows == null ? List.<ProviderActionPo>of() : existingProviderUsageRows)
+        List<ProviderConfigPo> existingProviderUsageRows = providerConfigMapper.selectExistingProviderUsages(requestedProviderUsages);
+        Set<ProviderUsageKey> validProviderUsages = (existingProviderUsageRows == null ? List.<ProviderConfigPo>of() : existingProviderUsageRows)
             .stream()
             .map(convertor::toProviderUsageKey)
             .filter(usage -> usage.getProviderName() != null && usage.getProviderType() != null)

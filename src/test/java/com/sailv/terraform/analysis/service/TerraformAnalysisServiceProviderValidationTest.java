@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.service;
 
-import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderConfig;
 import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
@@ -74,7 +74,7 @@ class TerraformAnalysisServiceProviderValidationTest {
     private static final class EmptyTemplateAnalysisGateway implements TemplateAnalysisGateway {
 
         @Override
-        public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
+        public List<ProviderConfig> findByProviderUsages(Collection<TerraformAction> actions) {
             return List.of();
         }
 
@@ -87,16 +87,14 @@ class TerraformAnalysisServiceProviderValidationTest {
     private static final class MixedTypeTemplateAnalysisGateway implements TemplateAnalysisGateway {
 
         @Override
-        public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
+        public List<ProviderConfig> findByProviderUsages(Collection<TerraformAction> actions) {
             return List.of(
-                new ProviderAction()
+                new ProviderConfig()
                     .setProviderName("huaweicloud_compute_instance")
-                    .setActionName("huaweicloud_compute_instance:data")
                     .setResourceType(null)
                     .setProviderType(ProviderType.DATA),
-                new ProviderAction()
+                new ProviderConfig()
                     .setProviderName("huaweicloud_compute_instance")
-                    .setActionName("huaweicloud_compute_instance:resource")
                     .setResourceType("ecs")
                     .setProviderType(ProviderType.RESOURCE)
             );

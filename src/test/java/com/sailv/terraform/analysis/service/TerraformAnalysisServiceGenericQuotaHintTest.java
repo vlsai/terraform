@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.service;
 
-import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderConfig;
 import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
@@ -85,10 +85,9 @@ class TerraformAnalysisServiceGenericQuotaHintTest {
     private static final class DmsHintGateway implements TemplateAnalysisGateway {
 
         @Override
-        public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
-            return List.of(new ProviderAction()
+        public List<ProviderConfig> findByProviderUsages(Collection<TerraformAction> actions) {
+            return List.of(new ProviderConfig()
                 .setProviderName("huaweicloud_dms_instance")
-                .setActionName("huaweicloud_dms_instance")
                 .setResourceType("DMS")
                 .setQuotaTypeHint("kafkaInstance")
                 .setProviderType(ProviderType.RESOURCE)
@@ -103,10 +102,9 @@ class TerraformAnalysisServiceGenericQuotaHintTest {
     private static final class RdsGateway implements TemplateAnalysisGateway {
 
         @Override
-        public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
-            return List.of(new ProviderAction()
+        public List<ProviderConfig> findByProviderUsages(Collection<TerraformAction> actions) {
+            return List.of(new ProviderConfig()
                 .setProviderName("huaweicloud_rds_instance")
-                .setActionName("huaweicloud_rds_instance")
                 .setResourceType("RDS")
                 .setProviderType(ProviderType.RESOURCE)
                 .setPrimaryQuotaSubject(true));

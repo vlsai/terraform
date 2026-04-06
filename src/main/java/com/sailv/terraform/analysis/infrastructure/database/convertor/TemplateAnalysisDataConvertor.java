@@ -1,11 +1,13 @@
 package com.sailv.terraform.analysis.infrastructure.database.convertor;
 
 import com.sailv.terraform.analysis.domain.model.ProviderAction;
+import com.sailv.terraform.analysis.domain.model.ProviderConfig;
 import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
 import com.sailv.terraform.analysis.domain.model.TemplateProvider;
 import com.sailv.terraform.analysis.domain.model.TemplateQuotaResource;
 import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
+import com.sailv.terraform.analysis.infrastructure.database.po.ProviderConfigPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.TemplateProviderPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.TemplateQuotaResourcePo;
 import org.mapstruct.Mapper;
@@ -28,12 +30,28 @@ public interface TemplateAnalysisDataConvertor {
     TemplateAnalysisDataConvertor INSTANCE = Mappers.getMapper(TemplateAnalysisDataConvertor.class);
 
     @Mapping(target = "providerType", expression = "java(toProviderType(source.getProviderType()))")
-    @Mapping(target = "primaryQuotaSubject", expression = "java(toPrimaryQuotaSubject(source.getIsPrimaryQuotaSubject()))")
     ProviderAction toProviderAction(ProviderActionPo source);
 
     List<ProviderAction> toProviderActions(Collection<ProviderActionPo> sources);
 
+    @Mapping(target = "providerType", expression = "java(toProviderType(source.getProviderType()))")
+    @Mapping(target = "resourceType", source = "quotaResourceType")
+    @Mapping(target = "primaryQuotaSubject", expression = "java(toPrimaryQuotaSubject(source.getIsPrimaryQuotaSubject()))")
+    ProviderConfig toProviderConfig(ProviderConfigPo source);
+
+    List<ProviderConfig> toProviderConfigs(Collection<ProviderConfigPo> sources);
+
     default ProviderUsageKey toProviderUsageKey(ProviderActionPo source) {
+        if (source == null) {
+            return null;
+        }
+        return new ProviderUsageKey(
+            source.getProviderName(),
+            toProviderType(source.getProviderType())
+        );
+    }
+
+    default ProviderUsageKey toProviderUsageKey(ProviderConfigPo source) {
         if (source == null) {
             return null;
         }
