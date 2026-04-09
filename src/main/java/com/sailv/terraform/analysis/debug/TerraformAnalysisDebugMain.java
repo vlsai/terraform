@@ -14,7 +14,9 @@ import com.sailv.terraform.analysis.service.TerraformAnalysisService;
 import com.sailv.terraform.analysis.service.impl.TerraformAnalysisServiceImpl;
 import lombok.extern.log4j.Log4j2;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
@@ -34,6 +36,7 @@ import java.util.Set;
  * <p>用途：
  * <ul>
  *     <li>默认读取 docs 下的真实示例压缩包</li>
+ *     <li>支持通过 dds-mode / dds-default-mode 直接跑内存中的 DDS 调试样例</li>
  *     <li>走真实的 service -> gateway -> mapper 装配路径，便于你在 IDE 里逐步断点</li>
  *     <li>最终直接打印两张表的待入库 PO 数据，而不只是打印领域结果</li>
  *     <li>provider/action 预制表改为内存版 mapper，避免本地 debug 依赖真实数据库</li>
@@ -44,6 +47,8 @@ import java.util.Set;
 @Log4j2
 public final class TerraformAnalysisDebugMain {
 
+    private static final String DDS_MODE_CASE = "dds-mode";
+    private static final String DDS_DEFAULT_MODE_CASE = "dds-default-mode";
     private static final Path DEFAULT_SOURCE =
         Path.of("docs", "左邻智慧园区.zip").toAbsolutePath();
 
@@ -51,36 +56,75 @@ public final class TerraformAnalysisDebugMain {
     }
 
     public static void main(String[] args) throws Exception {
-        Path sourcePath = resolveSourcePath(args);
-
         ProviderActionMapper providerActionMapper = new DebugProviderActionMapper();
-        RecordingTemplateProviderMapper templateProviderMapper = new RecordingTemplateProviderMapper();
-        RecordingTemplateQuotaResourceMapper templateQuotaResourceMapper = new RecordingTemplateQuotaResourceMapper();
-        DatabaseTemplateAnalysisGateway gateway = new DatabaseTemplateAnalysisGateway(
-            providerActionMapper,
-            templateProviderMapper,
-            templateQuotaResourceMapper
-        );
-        TerraformAnalysisService service = new TerraformAnalysisServiceImpl(gateway);
-
-        // 这里直接走 analyzeAndSave，便于你看到最终会进入两张表的 PO 数据。
-        try (InputStream inputStream = Files.newInputStream(sourcePath)) {
-            service.analyzeAndSave(
-                "debug-template-id",
-                inputStream,
-                sourcePath.getFileName().toString(),
-                defaultQuotaRules()
+        for (DebugSource source : resolveSources(args)) {
+            RecordingTemplateProviderMapper templateProviderMapper = new RecordingTemplateProviderMapper();
+            RecordingTemplateQuotaResourceMapper templateQuotaResourceMapper = new RecordingTemplateQuotaResourceMapper();
+            DatabaseTemplateAnalysisGateway debugGateway = new DatabaseTemplateAnalysisGateway(
+                providerActionMapper,
+                templateProviderMapper,
+                templateQuotaResourceMapper
             );
-        }
+            TerraformAnalysisService debugService = new TerraformAnalysisServiceImpl(debugGateway);
 
-        printStoredData(sourcePath, templateProviderMapper.insertedProviders, templateQuotaResourceMapper.insertedResources);
+            // 这里直接走 analyzeAndSave，便于你看到最终会进入两张表的 PO 数据。
+            try (InputStream inputStream = source.openStream()) {
+                debugService.analyzeAndSave(
+                    "debug-template-id",
+                    inputStream,
+                    source.getFileName(),
+                    defaultQuotaRules()
+                );
+            }
+
+            printStoredData(source.getDisplayName(), templateProviderMapper.insertedProviders, templateQuotaResourceMapper.insertedResources);
+        }
     }
 
-    private static Path resolveSourcePath(String[] args) {
+    private static List<DebugSource> resolveSources(String[] args) {
         if (args != null && args.length > 0 && args[0] != null && !args[0].isBlank()) {
-            return Path.of(args[0]).toAbsolutePath().normalize();
+            String sourceArg = args[0].trim();
+            if (DDS_MODE_CASE.equalsIgnoreCase(sourceArg)) {
+                return List.of(DebugSource.inline(DDS_MODE_CASE, """
+                    resource "huaweicloud_dds_instance" "dds" {
+                      count = 2
+                      mode  = "ReplicaSet"
+                    }
+                    """));
+            }
+            if (DDS_DEFAULT_MODE_CASE.equalsIgnoreCase(sourceArg)) {
+                return List.of(DebugSource.inline(DDS_DEFAULT_MODE_CASE, """
+                    variable "dds_mode" {
+                      type = string
+                    }
+
+                    resource "huaweicloud_dds_instance" "dds" {
+                      count = 1
+                      mode  = var.dds_mode
+                    }
+                    """));
+            }
+            return List.of(DebugSource.file(Path.of(sourceArg).toAbsolutePath().normalize()));
         }
-        return DEFAULT_SOURCE;
+        return List.of(
+            DebugSource.file(DEFAULT_SOURCE),
+            DebugSource.inline(DDS_MODE_CASE, """
+                resource "huaweicloud_dds_instance" "dds" {
+                  count = 2
+                  mode  = "ReplicaSet"
+                }
+                """),
+            DebugSource.inline(DDS_DEFAULT_MODE_CASE, """
+                variable "dds_mode" {
+                  type = string
+                }
+
+                resource "huaweicloud_dds_instance" "dds" {
+                  count = 1
+                  mode  = var.dds_mode
+                }
+                """)
+        );
     }
 
     private static QuotaCheckRule defaultQuotaRules() {
@@ -104,12 +148,12 @@ public final class TerraformAnalysisDebugMain {
     }
 
     private static void printStoredData(
-        Path sourcePath,
+        String sourceDescription,
         List<TemplateProviderPo> templateProviders,
         List<TemplateQuotaResourcePo> templateResources
     ) {
         log.info("=== Terraform Analysis Debug ===");
-        log.info("Source: {}", sourcePath);
+        log.info("Source: {}", sourceDescription);
         log.info("");
         log.info("t_mp_template_providers:");
         for (TemplateProviderPo provider : templateProviders) {
@@ -141,6 +185,49 @@ public final class TerraformAnalysisDebugMain {
         }
         if (templateResources.isEmpty()) {
             log.info("  (empty)");
+        }
+    }
+
+    private static final class DebugSource {
+
+        private final Path filePath;
+        private final String displayName;
+        private final String fileName;
+        private final byte[] inlineContent;
+
+        private DebugSource(Path filePath, String displayName, String fileName, byte[] inlineContent) {
+            this.filePath = filePath;
+            this.displayName = displayName;
+            this.fileName = fileName;
+            this.inlineContent = inlineContent;
+        }
+
+        private static DebugSource file(Path path) {
+            return new DebugSource(path, path.toString(), path.getFileName().toString(), null);
+        }
+
+        private static DebugSource inline(String caseName, String content) {
+            return new DebugSource(
+                null,
+                "inline:" + caseName,
+                "main.tf",
+                content.getBytes(StandardCharsets.UTF_8)
+            );
+        }
+
+        private InputStream openStream() throws Exception {
+            if (filePath != null) {
+                return Files.newInputStream(filePath);
+            }
+            return new ByteArrayInputStream(inlineContent);
+        }
+
+        private String getDisplayName() {
+            return displayName;
+        }
+
+        private String getFileName() {
+            return fileName;
         }
     }
 
