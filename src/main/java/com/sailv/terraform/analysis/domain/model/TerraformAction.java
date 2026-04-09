@@ -41,6 +41,8 @@ public class TerraformAction {
     private List<Integer> dataDiskSizes = new ArrayList<>();
     private Integer volumeSize;
     private String volumeSizeExpression;
+    private String mode;
+    private String modeExpression;
 
     public TerraformAction() {
     }

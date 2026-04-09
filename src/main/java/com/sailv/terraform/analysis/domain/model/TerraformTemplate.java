@@ -31,12 +31,15 @@ public class TerraformTemplate {
 
     private static final String ECS_RESOURCE_TYPE = "ECS";
     private static final String EVS_RESOURCE_TYPE = "EVS";
+    private static final String DDS_RESOURCE_TYPE = "DDS";
     private static final String ECS_RESOURCE_TYPE_KEY = QuotaCheckRule.normalizeResourceType(ECS_RESOURCE_TYPE);
     private static final String EVS_RESOURCE_TYPE_KEY = QuotaCheckRule.normalizeResourceType(EVS_RESOURCE_TYPE);
+    private static final String DDS_RESOURCE_TYPE_KEY = QuotaCheckRule.normalizeResourceType(DDS_RESOURCE_TYPE);
     private static final int DEFAULT_COUNT = 1;
     private static final int DEFAULT_SYSTEM_DISK_GIB = 40;
     private static final int DEFAULT_DATA_DISK_GIB = 40;
     private static final int DEFAULT_EVS_VOLUME_GIB = 40;
+    private static final String DEFAULT_DDS_QUOTA_TYPE = "Sharding";
 
     private final String fileId;
 
@@ -405,6 +408,11 @@ public class TerraformTemplate {
             return rule.getQuotaType();
         }
 
+        List<String> ddsQuotaTypes = selectDdsQuotaTypes(action, rule);
+        if (!ddsQuotaTypes.isEmpty()) {
+            return ddsQuotaTypes;
+        }
+
         List<String> hintedQuotaTypes = selectHintedQuotaTypes(action, rule, providerActionIndex);
         if (!hintedQuotaTypes.isEmpty()) {
             return hintedQuotaTypes;
@@ -420,6 +428,49 @@ public class TerraformTemplate {
         }
 
         return List.of();
+    }
+
+    private List<String> selectDdsQuotaTypes(TerraformAction action, QuotaCheckRule.CloudServiceRule rule) {
+        if (!DDS_RESOURCE_TYPE_KEY.equals(QuotaCheckRule.normalizeResourceType(rule.getResourceType()))) {
+            return List.of();
+        }
+        if (rule.getQuotaType() == null || rule.getQuotaType().isEmpty()) {
+            return List.of();
+        }
+
+        Map<String, String> normalizedRuleQuotaTypes = rule.getQuotaType().stream()
+            .filter(Objects::nonNull)
+            .map(String::trim)
+            .filter(value -> !value.isEmpty())
+            .collect(Collectors.toMap(
+                this::normalizeKey,
+                quotaType -> quotaType,
+                (left, right) -> left,
+                LinkedHashMap::new
+            ));
+        if (normalizedRuleQuotaTypes.isEmpty()) {
+            return List.of();
+        }
+
+        String resolvedQuotaType = resolveDdsQuotaType(action, normalizedRuleQuotaTypes);
+        return resolvedQuotaType == null ? List.of() : List.of(resolvedQuotaType);
+    }
+
+    private String resolveDdsQuotaType(TerraformAction action, Map<String, String> normalizedRuleQuotaTypes) {
+        String mode = action == null ? null : action.getMode();
+        String matchedQuotaType = findQuotaTypeByNormalizedValue(mode, normalizedRuleQuotaTypes);
+        if (matchedQuotaType != null) {
+            return matchedQuotaType;
+        }
+        return findQuotaTypeByNormalizedValue(DEFAULT_DDS_QUOTA_TYPE, normalizedRuleQuotaTypes);
+    }
+
+    private String findQuotaTypeByNormalizedValue(String value, Map<String, String> normalizedRuleQuotaTypes) {
+        String normalizedValue = normalizeKey(value);
+        if (normalizedValue == null || normalizedRuleQuotaTypes == null || normalizedRuleQuotaTypes.isEmpty()) {
+            return null;
+        }
+        return normalizedRuleQuotaTypes.get(normalizedValue);
     }
 
     private List<String> selectHintedQuotaTypes(
@@ -829,6 +880,13 @@ public class TerraformTemplate {
                     actionWithSource.sourceName,
                     "size"
                 ));
+                action.setMode(resolveStringExpression(
+                    action.getModeExpression(),
+                    localValues,
+                    effectiveVariables,
+                    actionWithSource.sourceName,
+                    "mode"
+                ));
                 action.setDataDiskSizes(resolveDiskSizes(
                     effectiveVariables.get("data_disks"),
                     localValues,
@@ -882,7 +940,9 @@ public class TerraformTemplate {
                 .setSystemDiskSizeExpression(action.getSystemDiskSizeExpression())
                 .setDataDiskSizes(action.getDataDiskSizes() == null ? new ArrayList<>() : new ArrayList<>(action.getDataDiskSizes()))
                 .setVolumeSize(action.getVolumeSize())
-                .setVolumeSizeExpression(action.getVolumeSizeExpression());
+                .setVolumeSizeExpression(action.getVolumeSizeExpression())
+                .setMode(action.getMode())
+                .setModeExpression(action.getModeExpression());
         }
     }
 

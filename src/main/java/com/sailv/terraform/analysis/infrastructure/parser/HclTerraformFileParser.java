@@ -104,7 +104,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
      *
      * <p>这里不替代 hcl4j 的主解析职责，只在 hcl4j 已经识别出资源块的前提下，
      * 用原始文本把缺失的少数字段补回来。补位范围保持最小，只处理资源块顶层的：
-     * `count`、`flavor_id`、`system_disk_size`、`size`。
+     * `count`、`flavor_id`、`system_disk_size`、`size`、`mode`。
      */
     private void supplementMissingTopLevelExpressions(String rawContent, List<TerraformAction> actions) {
         if (rawContent == null || rawContent.isBlank() || actions == null || actions.isEmpty()) {
@@ -127,6 +127,7 @@ public class HclTerraformFileParser implements TerraformFileParser {
             overrideExpressionFromSource(action::setFlavorIdExpression, blockBody, "flavor_id");
             overrideExpressionFromSource(action::setSystemDiskSizeExpression, blockBody, "system_disk_size");
             overrideExpressionFromSource(action::setVolumeSizeExpression, blockBody, "size");
+            overrideExpressionFromSource(action::setModeExpression, blockBody, "mode");
         }
     }
 
@@ -401,6 +402,9 @@ public class HclTerraformFileParser implements TerraformFileParser {
                     : null)
                 .setVolumeSizeExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(attributes.get("size"))
+                    : null)
+                .setModeExpression(providerType == ProviderType.RESOURCE
+                    ? normalizeExpression(attributes.get("mode"))
                     : null);
             actions.add(action);
         }

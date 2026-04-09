@@ -270,6 +270,9 @@ public class JsonTerraformFileParser implements TerraformFileParser {
                     : null)
                 .setVolumeSizeExpression(providerType == ProviderType.RESOURCE
                     ? normalizeExpression(readExpression(instance.getValue(), "size"))
+                    : null)
+                .setModeExpression(providerType == ProviderType.RESOURCE
+                    ? normalizeExpression(readExpression(instance.getValue(), "mode"))
                     : null);
             actions.add(action);
         }

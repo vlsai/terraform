@@ -82,6 +82,68 @@ class TerraformAnalysisServiceGenericQuotaHintTest {
         assertEquals(3, result.getQuotaResources().getFirst().getQuotaRequirement());
     }
 
+    @Test
+    void shouldSelectDdsQuotaTypeByResolvedMode() throws Exception {
+        byte[] content = """
+            resource "huaweicloud_dds_instance" "dds" {
+              count = 2
+              mode  = "ReplicaSet"
+            }
+            """
+            .getBytes(StandardCharsets.UTF_8);
+
+        TerraformAnalysisService service = new TerraformAnalysisServiceImpl(new DdsGateway());
+        TemplateAnalysisResult result;
+        try (ByteArrayInputStream inputStream = new ByteArrayInputStream(content)) {
+            result = service.analyze(
+                "template-dds-mode",
+                inputStream,
+                "main.tf",
+                QuotaCheckRule.of(
+                    QuotaCheckRule.CloudServiceRule.of("DDS", "https://quota.internal/dds", "Sharding", "ReplicaSet", "Single")
+                )
+            );
+        }
+
+        assertEquals(1, result.getQuotaResources().size());
+        assertEquals("DDS", result.getQuotaResources().getFirst().getResourceType());
+        assertEquals("ReplicaSet", result.getQuotaResources().getFirst().getQuotaType());
+        assertEquals(2, result.getQuotaResources().getFirst().getQuotaRequirement());
+    }
+
+    @Test
+    void shouldFallbackToShardingWhenDdsModeCannotBeResolved() throws Exception {
+        byte[] content = """
+            variable "dds_mode" {
+              type = string
+            }
+
+            resource "huaweicloud_dds_instance" "dds" {
+              count = 1
+              mode  = var.dds_mode
+            }
+            """
+            .getBytes(StandardCharsets.UTF_8);
+
+        TerraformAnalysisService service = new TerraformAnalysisServiceImpl(new DdsGateway());
+        TemplateAnalysisResult result;
+        try (ByteArrayInputStream inputStream = new ByteArrayInputStream(content)) {
+            result = service.analyze(
+                "template-dds-default-mode",
+                inputStream,
+                "main.tf",
+                QuotaCheckRule.of(
+                    QuotaCheckRule.CloudServiceRule.of("DDS", "https://quota.internal/dds", "Sharding", "ReplicaSet", "Single")
+                )
+            );
+        }
+
+        assertEquals(1, result.getQuotaResources().size());
+        assertEquals("DDS", result.getQuotaResources().getFirst().getResourceType());
+        assertEquals("Sharding", result.getQuotaResources().getFirst().getQuotaType());
+        assertEquals(1, result.getQuotaResources().getFirst().getQuotaRequirement());
+    }
+
     private static final class DmsHintGateway implements TemplateAnalysisGateway {
 
         @Override
@@ -108,6 +170,23 @@ class TerraformAnalysisServiceGenericQuotaHintTest {
                 .setProviderName("huaweicloud_rds_instance")
                 .setActionName("huaweicloud_rds_instance")
                 .setResourceType("RDS")
+                .setProviderType(ProviderType.RESOURCE)
+                .setPrimaryQuotaSubject(true));
+        }
+
+        @Override
+        public void save(TemplateAnalysisResult result) {
+        }
+    }
+
+    private static final class DdsGateway implements TemplateAnalysisGateway {
+
+        @Override
+        public List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions) {
+            return List.of(new ProviderAction()
+                .setProviderName("huaweicloud_dds_instance")
+                .setActionName("huaweicloud_dds_instance")
+                .setResourceType("DDS")
                 .setProviderType(ProviderType.RESOURCE)
                 .setPrimaryQuotaSubject(true));
         }
