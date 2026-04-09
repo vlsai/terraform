@@ -8,7 +8,9 @@
         <result property="providerName" column="provider_name"/>
         <result property="actionName" column="action_name"/>
         <result property="resourceType" column="resource_type"/>
+        <result property="quotaTypeHint" column="quota_type_hint"/>
         <result property="providerType" column="provider_type"/>
+        <result property="isPrimaryQuotaSubject" column="is_primary_quota_subject"/>
         <result property="createTime" column="create_time"/>
         <result property="updateTime" column="update_time"/>
     </resultMap>
@@ -23,7 +25,9 @@
             provider_name,
             action_name,
             resource_type,
+            quota_type_hint,
             provider_type,
+            is_primary_quota_subject,
             create_time,
             update_time
         FROM t_mp_provider_actions

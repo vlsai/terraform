@@ -1,7 +1,7 @@
 package com.sailv.terraform.analysis.service.impl;
 
 import com.sailv.terraform.analysis.application.parser.TerraformFileParser;
-import com.sailv.terraform.analysis.domain.model.ProviderConfig;
+import com.sailv.terraform.analysis.domain.model.ProviderAction;
 import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
@@ -26,7 +26,7 @@ import java.util.Objects;
  * <p>责任已极大简化为纯粹的流程编排：
  * <ul>
  *     <li>构造 `TerraformTemplate` 并在构造阶段完成源码解析和数据合并收集</li>
- *     <li>通过 Gateway 获取数据库预设映射（`t_mp_provider_config`）</li>
+ *     <li>通过 Gateway 获取数据库预设映射（t_mp_provider_actions）</li>
  *     <li>委托 `TerraformTemplate.extractQuotas` 基于提取的数据和预制表生成具体的用量配额和 Provider 供存储</li>
  * </ul>
  */
@@ -63,12 +63,12 @@ public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
         TerraformTemplate template = new TerraformTemplate(templateId, inputStream, fileName, parsers);
 
         // 2. 通过聚合的动作从底层存储拿到真实的映射和种类描述
-        List<ProviderConfig> providerConfigs = templateAnalysisGateway.findByProviderUsages(
+        List<ProviderAction> presetActions = templateAnalysisGateway.findByProviderNameAndActionName(
             template.getActions().values()
         );
 
         // 3. 在进入领域计算前先按 providerName 归组，领域层只消费已经结构化的数据
-        return template.extractQuotas(quotaRules, indexProviderConfigs(providerConfigs));
+        return template.extractQuotas(quotaRules, indexProviderActions(presetActions));
     }
 
     @Override
@@ -76,20 +76,20 @@ public class TerraformAnalysisServiceImpl implements TerraformAnalysisService {
         templateAnalysisGateway.save(result);
     }
 
-    private Map<ProviderUsageKey, List<ProviderConfig>> indexProviderConfigs(List<ProviderConfig> providerConfigs) {
-        Map<ProviderUsageKey, List<ProviderConfig>> indexed = new LinkedHashMap<>();
-        if (providerConfigs == null) {
+    private Map<ProviderUsageKey, List<ProviderAction>> indexProviderActions(List<ProviderAction> providerActions) {
+        Map<ProviderUsageKey, List<ProviderAction>> indexed = new LinkedHashMap<>();
+        if (providerActions == null) {
             return indexed;
         }
-        for (ProviderConfig providerConfig : providerConfigs) {
-            if (providerConfig == null
-                || providerConfig.getProviderName() == null
-                || providerConfig.getProviderName().isBlank()
-                || providerConfig.getProviderType() == null) {
+        for (ProviderAction providerAction : providerActions) {
+            if (providerAction == null
+                || providerAction.getProviderName() == null
+                || providerAction.getProviderName().isBlank()
+                || providerAction.getProviderType() == null) {
                 continue;
             }
-            ProviderUsageKey usageKey = new ProviderUsageKey(providerConfig.getProviderName(), providerConfig.getProviderType());
-            indexed.computeIfAbsent(usageKey, ignored -> new java.util.ArrayList<>()).add(providerConfig);
+            ProviderUsageKey usageKey = new ProviderUsageKey(providerAction.getProviderName(), providerAction.getProviderType());
+            indexed.computeIfAbsent(usageKey, ignored -> new java.util.ArrayList<>()).add(providerAction);
         }
         return indexed;
     }

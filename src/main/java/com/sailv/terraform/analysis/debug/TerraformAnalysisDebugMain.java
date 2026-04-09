@@ -3,10 +3,10 @@ package com.sailv.terraform.analysis.debug;
 import com.sailv.terraform.analysis.domain.model.QuotaCheckRule;
 import com.sailv.terraform.analysis.domain.model.ProviderType;
 import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
-import com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderConfigMapper;
+import com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderActionMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateProviderMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateQuotaResourceMapper;
-import com.sailv.terraform.analysis.infrastructure.database.po.ProviderConfigPo;
+import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.TemplateProviderPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.TemplateQuotaResourcePo;
 import com.sailv.terraform.analysis.infrastructure.gateway.DatabaseTemplateAnalysisGateway;
@@ -36,7 +36,7 @@ import java.util.Set;
  *     <li>默认读取 docs 下的真实示例压缩包</li>
  *     <li>走真实的 service -> gateway -> mapper 装配路径，便于你在 IDE 里逐步断点</li>
  *     <li>最终直接打印两张表的待入库 PO 数据，而不只是打印领域结果</li>
- *     <li>provider 配置预制表改为内存版 mapper，避免本地 debug 依赖真实数据库</li>
+ *     <li>provider/action 预制表改为内存版 mapper，避免本地 debug 依赖真实数据库</li>
  * </ul>
  *
  * <p>如果你要调别的文件，可以直接在 IDE 里改 DEFAULT_SOURCE，或者通过命令行传第一个参数覆盖。
@@ -53,11 +53,11 @@ public final class TerraformAnalysisDebugMain {
     public static void main(String[] args) throws Exception {
         Path sourcePath = resolveSourcePath(args);
 
-        ProviderConfigMapper providerConfigMapper = new DebugProviderConfigMapper();
+        ProviderActionMapper providerActionMapper = new DebugProviderActionMapper();
         RecordingTemplateProviderMapper templateProviderMapper = new RecordingTemplateProviderMapper();
         RecordingTemplateQuotaResourceMapper templateQuotaResourceMapper = new RecordingTemplateQuotaResourceMapper();
         DatabaseTemplateAnalysisGateway gateway = new DatabaseTemplateAnalysisGateway(
-            providerConfigMapper,
+            providerActionMapper,
             templateProviderMapper,
             templateQuotaResourceMapper
         );
@@ -145,52 +145,52 @@ public final class TerraformAnalysisDebugMain {
     }
 
     /**
-     * 调试用的 provider 配置 mapper。
+     * 调试用的 provider_action mapper。
      *
      * <p>这层不是 gateway stub，而是给真实的 DatabaseTemplateAnalysisGateway 提供一个最小可运行的
      * 预制表实现，方便本地单步调试。
      */
-    private static final class DebugProviderConfigMapper implements ProviderConfigMapper {
+    private static final class DebugProviderActionMapper implements ProviderActionMapper {
 
-        private final Map<ProviderUsageKey, List<ProviderConfigPo>> definitions = new LinkedHashMap<>();
+        private final Map<ProviderUsageKey, List<ProviderActionPo>> definitions = new LinkedHashMap<>();
 
-        private DebugProviderConfigMapper() {
-            registerResource("huaweicloud", "ecs");
-            registerResource("huaweicloud_compute_instance", "ecs");
-            registerResource("huaweicloud_cce_node", "cce");
-            registerResource("huaweicloud_cce_cluster", "cce");
-            registerResource("huaweicloud", "vpc");
-            registerResource("huaweicloud_vpc", "vpc");
-            registerResource("huaweicloud", "vpc", 0);
-            registerResource("huaweicloud_vpc", "vpc", 0);
-            registerResource("huaweicloud", "secgroup");
-            registerResource("huaweicloud_networking_secgroup", "secgroup");
-            registerResource("huaweicloud", "secgroup", 0);
-            registerResource("huaweicloud_networking_secgroup", "secgroup", 0);
-            registerResource("huaweicloud", "evs");
-            registerResource("huaweicloud_evs_volume", "evs");
-            registerResource("huaweicloud", "elb");
-            registerResource("huaweicloud_elb_loadbalancer", "elb");
-            registerResource("huaweicloud", "nat");
-            registerResource("huaweicloud_nat_gateway", "nat");
-            registerResource("huaweicloud", "eip");
-            registerResource("huaweicloud_vpc_eip", "eip");
-            registerResource("huaweicloud_vpc_eip_associate", "eip", 0);
-            registerResource("huaweicloud", "rds");
-            registerResource("huaweicloud_rds_instance", "rds");
-            registerResource("huaweicloud_rds_mysql_account", "rds", 0);
-            registerResource("huaweicloud_rds_mysql_database", "rds", 0);
-            registerResource("huaweicloud_rds_mysql_database_privilege", "rds", 0);
-            registerResource("huaweicloud_dcs_instance", "dcs");
-            registerResource("huaweicloud_cbr_vault", "cbr");
-            registerResource("huaweicloud_cbr_policy", "cbr", 0);
-            registerResource("huaweicloud_cbh_instance", "cbh");
-            registerResource("huaweicloud_dms_kafka_instance", "dms", 1, "kafkaInstance");
-            registerResource("huaweicloud_dms_rabbitmq_instance", "dms", 1, "rabbitmqInstance");
-            registerResource("huaweicloud_dds_instance", "dds");
-            registerResource("huaweicloud_gaussdb_mysql_instance", "gausedb");
-            registerResource("huaweicloud_css_cluster", "css");
-            registerResource("huaweicloud_sfs_file_system", "sfs_turbo");
+        private DebugProviderActionMapper() {
+            registerResource("huaweicloud", "huaweicloud_compute_instance", "ecs");
+            registerResource("huaweicloud_compute_instance", "huaweicloud_compute_instance", "ecs");
+            registerResource("huaweicloud_cce_node", "huaweicloud_cce_node", "cce");
+            registerResource("huaweicloud_cce_cluster", "huaweicloud_cce_cluster", "cce");
+            registerResource("huaweicloud", "huaweicloud_vpc", "vpc");
+            registerResource("huaweicloud_vpc", "huaweicloud_vpc", "vpc");
+            registerResource("huaweicloud", "huaweicloud_vpc_subnet", "vpc", 0);
+            registerResource("huaweicloud_vpc_subnet", "huaweicloud_vpc_subnet", "vpc", 0);
+            registerResource("huaweicloud", "huaweicloud_networking_secgroup", "secgroup");
+            registerResource("huaweicloud_networking_secgroup", "huaweicloud_networking_secgroup", "secgroup");
+            registerResource("huaweicloud", "huaweicloud_networking_secgroup_rule", "secgroup", 0);
+            registerResource("huaweicloud_networking_secgroup_rule", "huaweicloud_networking_secgroup_rule", "secgroup", 0);
+            registerResource("huaweicloud", "huaweicloud_evs_volume", "evs");
+            registerResource("huaweicloud_evs_volume", "huaweicloud_evs_volume", "evs");
+            registerResource("huaweicloud", "huaweicloud_elb_loadbalancer", "elb");
+            registerResource("huaweicloud_elb_loadbalancer", "huaweicloud_elb_loadbalancer", "elb");
+            registerResource("huaweicloud", "huaweicloud_nat_gateway", "nat");
+            registerResource("huaweicloud_nat_gateway", "huaweicloud_nat_gateway", "nat");
+            registerResource("huaweicloud", "huaweicloud_vpc_eip", "eip");
+            registerResource("huaweicloud_vpc_eip", "huaweicloud_vpc_eip", "eip");
+            registerResource("huaweicloud_vpc_eip_associate", "huaweicloud_vpc_eip_associate", "eip", 0);
+            registerResource("huaweicloud", "huaweicloud_rds_instance", "rds");
+            registerResource("huaweicloud_rds_instance", "huaweicloud_rds_instance", "rds");
+            registerResource("huaweicloud_rds_mysql_account", "huaweicloud_rds_mysql_account", "rds", 0);
+            registerResource("huaweicloud_rds_mysql_database", "huaweicloud_rds_mysql_database", "rds", 0);
+            registerResource("huaweicloud_rds_mysql_database_privilege", "huaweicloud_rds_mysql_database_privilege", "rds", 0);
+            registerResource("huaweicloud_dcs_instance", "huaweicloud_dcs_instance", "dcs");
+            registerResource("huaweicloud_cbr_vault", "huaweicloud_cbr_vault", "cbr");
+            registerResource("huaweicloud_cbr_policy", "huaweicloud_cbr_policy", "cbr", 0);
+            registerResource("huaweicloud_cbh_instance", "huaweicloud_cbh_instance", "cbh");
+            registerResource("huaweicloud_dms_kafka_instance", "huaweicloud_dms_kafka_instance", "dms", 1, "kafkaInstance");
+            registerResource("huaweicloud_dms_rabbitmq_instance", "huaweicloud_dms_rabbitmq_instance", "dms", 1, "rabbitmqInstance");
+            registerResource("huaweicloud_dds_instance", "huaweicloud_dds_instance", "dds");
+            registerResource("huaweicloud_gaussdb_mysql_instance", "huaweicloud_gaussdb_mysql_instance", "gausedb");
+            registerResource("huaweicloud_css_cluster", "huaweicloud_css_cluster", "css");
+            registerResource("huaweicloud_sfs_file_system", "huaweicloud_sfs_file_system", "sfs_turbo");
 
             // docs 示例包里真实存在的一批 data source。
             // 这些类型不参与配额入库，但应该出现在 t_mp_template_providers 中，
@@ -209,11 +209,11 @@ public final class TerraformAnalysisDebugMain {
         }
 
         @Override
-        public List<ProviderConfigPo> selectByProviderUsages(Collection<ProviderUsageKey> providerUsages) {
+        public List<ProviderActionPo> selectByProviderUsages(Collection<ProviderUsageKey> providerUsages) {
             if (providerUsages == null || providerUsages.isEmpty()) {
                 return List.of();
             }
-            List<ProviderConfigPo> resolved = new ArrayList<>();
+            List<ProviderActionPo> resolved = new ArrayList<>();
             for (ProviderUsageKey usage : providerUsages) {
                 if (usage == null || usage.getProviderName() == null || usage.getProviderName().isBlank() || usage.getProviderType() == null) {
                     continue;
@@ -224,17 +224,17 @@ public final class TerraformAnalysisDebugMain {
         }
 
         @Override
-        public List<ProviderConfigPo> selectExistingProviderUsages(Collection<ProviderUsageKey> providerUsages) {
+        public List<ProviderActionPo> selectExistingProviderUsages(Collection<ProviderUsageKey> providerUsages) {
             if (providerUsages == null || providerUsages.isEmpty()) {
                 return List.of();
             }
-            List<ProviderConfigPo> existing = new ArrayList<>();
+            List<ProviderActionPo> existing = new ArrayList<>();
             for (ProviderUsageKey usage : providerUsages) {
                 if (usage == null || usage.getProviderName() == null || usage.getProviderName().isBlank() || usage.getProviderType() == null) {
                     continue;
                 }
                 if (!resolve(usage).isEmpty()) {
-                    existing.add(new ProviderConfigPo()
+                    existing.add(new ProviderActionPo()
                         .setProviderName(usage.getProviderName())
                         .setProviderType(usage.getProviderType().getDbValue()));
                 }
@@ -242,23 +242,34 @@ public final class TerraformAnalysisDebugMain {
             return existing;
         }
 
-        private void registerResource(String providerName, String resourceType) {
-            registerResource(providerName, resourceType, 1, null);
-        }
-
-        private void registerResource(String providerName, String resourceType, int primaryQuotaSubject) {
-            registerResource(providerName, resourceType, primaryQuotaSubject, null);
+        private void registerResource(
+            String providerName,
+            String actionName,
+            String resourceType
+        ) {
+            registerResource(providerName, actionName, resourceType, 1, null);
         }
 
         private void registerResource(
             String providerName,
+            String actionName,
+            String resourceType,
+            int primaryQuotaSubject
+        ) {
+            registerResource(providerName, actionName, resourceType, primaryQuotaSubject, null);
+        }
+
+        private void registerResource(
+            String providerName,
+            String actionName,
             String resourceType,
             int primaryQuotaSubject,
             String quotaTypeHint
         ) {
-            ProviderConfigPo po = new ProviderConfigPo()
+            ProviderActionPo po = new ProviderActionPo()
                 .setProviderName(providerName)
-                .setQuotaResourceType(resourceType)
+                .setActionName(actionName)
+                .setResourceType(resourceType)
                 .setQuotaTypeHint(quotaTypeHint)
                 .setProviderType("resource")
                 .setIsPrimaryQuotaSubject(primaryQuotaSubject)
@@ -268,9 +279,10 @@ public final class TerraformAnalysisDebugMain {
         }
 
         private void registerDatasource(String providerName) {
-            ProviderConfigPo po = new ProviderConfigPo()
+            ProviderActionPo po = new ProviderActionPo()
                 .setProviderName(providerName)
-                .setQuotaResourceType(null)
+                .setActionName(providerName)
+                .setResourceType(null)
                 .setProviderType("data")
                 .setIsPrimaryQuotaSubject(0)
                 .setCreateTime(LocalDateTime.now())
@@ -278,8 +290,8 @@ public final class TerraformAnalysisDebugMain {
             definitions.computeIfAbsent(new ProviderUsageKey(providerName, ProviderType.DATA), ignored -> new ArrayList<>()).add(po);
         }
 
-        private List<ProviderConfigPo> resolve(ProviderUsageKey usage) {
-            List<ProviderConfigPo> exact = definitions.get(usage);
+        private List<ProviderActionPo> resolve(ProviderUsageKey usage) {
+            List<ProviderActionPo> exact = definitions.get(usage);
             if (exact != null && !exact.isEmpty()) {
                 return exact;
             }
@@ -297,9 +309,10 @@ public final class TerraformAnalysisDebugMain {
             }
 
             if (usage.getProviderType() == ProviderType.DATA) {
-                return List.of(new ProviderConfigPo()
+                return List.of(new ProviderActionPo()
                     .setProviderName(normalizedProvider)
-                    .setQuotaResourceType(null)
+                    .setActionName(normalizedProvider)
+                    .setResourceType(null)
                     .setProviderType("data")
                     .setIsPrimaryQuotaSubject(0));
             }
@@ -308,9 +321,10 @@ public final class TerraformAnalysisDebugMain {
             if (resourceType == null) {
                 return List.of();
             }
-            return List.of(new ProviderConfigPo()
+            return List.of(new ProviderActionPo()
                 .setProviderName(normalizedProvider)
-                .setQuotaResourceType(resourceType)
+                .setActionName(normalizedProvider)
+                .setResourceType(resourceType)
                 .setProviderType("resource")
                 .setIsPrimaryQuotaSubject(1)); // Defaulting to primary resource in debug logic when inferred
         }

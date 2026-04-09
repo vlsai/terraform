@@ -5,9 +5,9 @@ import lombok.Setter;
 import lombok.experimental.Accessors;
 
 /**
- * provider action 预制定义的领域映射。
+ * 预制表 `t_mp_provider_actions` 的领域映射。
  *
- * <p>当前由 `t_mp_provider_actions` 映射得到。
+ * <p>同一个 providerName 可能同时存在 RESOURCE 和 DATA 两种类型的记录。
  */
 @Getter
 @Setter
@@ -16,16 +16,35 @@ public class ProviderAction {
     private String providerName;
     private String actionName;
     private String resourceType;
+    private String quotaTypeHint;
     private ProviderType providerType;
+    private boolean primaryQuotaSubject = true;
 
     public ProviderAction() {
     }
 
     public ProviderAction(String providerName, String actionName, String resourceType, ProviderType providerType) {
+        this(providerName, actionName, resourceType, null, providerType, true);
+    }
+
+    public ProviderAction(String providerName, String actionName, String resourceType, ProviderType providerType, boolean primaryQuotaSubject) {
+        this(providerName, actionName, resourceType, null, providerType, primaryQuotaSubject);
+    }
+
+    public ProviderAction(
+        String providerName,
+        String actionName,
+        String resourceType,
+        String quotaTypeHint,
+        ProviderType providerType,
+        boolean primaryQuotaSubject
+    ) {
         this.providerName = providerName;
         this.actionName = actionName;
         this.resourceType = resourceType;
+        this.quotaTypeHint = quotaTypeHint;
         this.providerType = providerType;
+        this.primaryQuotaSubject = primaryQuotaSubject;
     }
 
     @Override
@@ -36,14 +55,16 @@ public class ProviderAction {
         if (!(object instanceof ProviderAction other)) {
             return false;
         }
-        return java.util.Objects.equals(providerName, other.providerName)
-            && java.util.Objects.equals(actionName, other.actionName)
-            && java.util.Objects.equals(resourceType, other.resourceType)
-            && providerType == other.providerType;
+        return primaryQuotaSubject == other.primaryQuotaSubject
+                && java.util.Objects.equals(providerName, other.providerName)
+                && java.util.Objects.equals(actionName, other.actionName)
+                && java.util.Objects.equals(resourceType, other.resourceType)
+                && java.util.Objects.equals(quotaTypeHint, other.quotaTypeHint)
+                && providerType == other.providerType;
     }
 
     @Override
     public int hashCode() {
-        return java.util.Objects.hash(providerName, actionName, resourceType, providerType);
+        return java.util.Objects.hash(providerName, actionName, resourceType, quotaTypeHint, providerType, primaryQuotaSubject);
     }
 }

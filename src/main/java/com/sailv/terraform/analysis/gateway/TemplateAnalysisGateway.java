@@ -1,6 +1,6 @@
 package com.sailv.terraform.analysis.gateway;
 
-import com.sailv.terraform.analysis.domain.model.ProviderConfig;
+import com.sailv.terraform.analysis.domain.model.ProviderAction;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TerraformAction;
 
@@ -23,7 +23,7 @@ public interface TemplateAnalysisGateway {
     /**
      * 批量查询预制表定义。
      */
-    List<ProviderConfig> findByProviderUsages(Collection<TerraformAction> actions);
+    List<ProviderAction> findByProviderNameAndActionName(Collection<TerraformAction> actions);
 
     void save(TemplateAnalysisResult result);
 }

@@ -7,9 +7,7 @@ import lombok.experimental.Accessors;
 import java.time.LocalDateTime;
 
 /**
- * provider action 预制定义的数据库层对象。
- *
- * <p>查询时由 `t_mp_provider_actions` 映射得到。
+ * `t_mp_provider_actions` 数据库层对象。
  */
 @Getter
 @Setter
@@ -18,7 +16,9 @@ public class ProviderActionPo {
     private String providerName;
     private String actionName;
     private String resourceType;
+    private String quotaTypeHint;
     private String providerType;
+    private Integer isPrimaryQuotaSubject;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 

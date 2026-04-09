@@ -5,10 +5,10 @@ import com.sailv.terraform.analysis.domain.model.ProviderUsageKey;
 import com.sailv.terraform.analysis.domain.model.TemplateAnalysisResult;
 import com.sailv.terraform.analysis.domain.model.TemplateProvider;
 import com.sailv.terraform.analysis.domain.model.TemplateQuotaResource;
-import com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderConfigMapper;
+import com.sailv.terraform.analysis.infrastructure.database.mapper.ProviderActionMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateProviderMapper;
 import com.sailv.terraform.analysis.infrastructure.database.mapper.TemplateQuotaResourceMapper;
-import com.sailv.terraform.analysis.infrastructure.database.po.ProviderConfigPo;
+import com.sailv.terraform.analysis.infrastructure.database.po.ProviderActionPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.TemplateProviderPo;
 import com.sailv.terraform.analysis.infrastructure.database.po.TemplateQuotaResourcePo;
 import org.junit.jupiter.api.Test;
@@ -25,14 +25,14 @@ class DatabaseTemplateAnalysisGatewayTest {
 
     @Test
     void shouldValidateProvidersAgainstPresetTableBeforeInsert() {
-        RecordingProviderConfigMapper providerConfigMapper = new RecordingProviderConfigMapper(
+        RecordingProviderActionMapper providerActionMapper = new RecordingProviderActionMapper(
             Set.of(new ProviderUsageKey("huaweicloud", ProviderType.RESOURCE))
         );
         RecordingTemplateProviderMapper templateProviderMapper = new RecordingTemplateProviderMapper();
         RecordingTemplateQuotaResourceMapper templateQuotaResourceMapper = new RecordingTemplateQuotaResourceMapper();
 
         DatabaseTemplateAnalysisGateway gateway = new DatabaseTemplateAnalysisGateway(
-            providerConfigMapper,
+            providerActionMapper,
             templateProviderMapper,
             templateQuotaResourceMapper
         );
@@ -51,7 +51,7 @@ class DatabaseTemplateAnalysisGatewayTest {
                 new ProviderUsageKey("huaweicloud", ProviderType.RESOURCE),
                 new ProviderUsageKey("unknowncloud", ProviderType.RESOURCE)
             ),
-            providerConfigMapper.lastQueriedProviderUsages
+            providerActionMapper.lastQueriedProviderUsages
         );
         assertEquals(1, templateProviderMapper.insertedProviders.size());
         assertEquals("huaweicloud", templateProviderMapper.insertedProviders.getFirst().getProviderName());
@@ -59,25 +59,25 @@ class DatabaseTemplateAnalysisGatewayTest {
         assertEquals(Integer.valueOf(3), templateQuotaResourceMapper.insertedResources.getFirst().getQuotaRequirement());
     }
 
-    private static final class RecordingProviderConfigMapper implements ProviderConfigMapper {
+    private static final class RecordingProviderActionMapper implements ProviderActionMapper {
         private final Set<ProviderUsageKey> existingProviderUsages;
         private Set<ProviderUsageKey> lastQueriedProviderUsages = Set.of();
 
-        private RecordingProviderConfigMapper(Set<ProviderUsageKey> existingProviderUsages) {
+        private RecordingProviderActionMapper(Set<ProviderUsageKey> existingProviderUsages) {
             this.existingProviderUsages = new LinkedHashSet<>(existingProviderUsages);
         }
 
         @Override
-        public List<ProviderConfigPo> selectByProviderUsages(Collection<ProviderUsageKey> providerUsages) {
+        public List<ProviderActionPo> selectByProviderUsages(Collection<ProviderUsageKey> providerUsages) {
             return List.of();
         }
 
         @Override
-        public List<ProviderConfigPo> selectExistingProviderUsages(Collection<ProviderUsageKey> providerUsages) {
+        public List<ProviderActionPo> selectExistingProviderUsages(Collection<ProviderUsageKey> providerUsages) {
             lastQueriedProviderUsages = new LinkedHashSet<>(providerUsages);
             return providerUsages.stream()
                 .filter(existingProviderUsages::contains)
-                .map(usage -> new ProviderConfigPo()
+                .map(usage -> new ProviderActionPo()
                     .setProviderName(usage.getProviderName())
                     .setProviderType(usage.getProviderType().getDbValue())
                     .setIsPrimaryQuotaSubject(1))
